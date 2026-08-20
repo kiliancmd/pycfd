@@ -1,0 +1,196 @@
+{
+  "_meta": {
+    "purpose": "Recorded benchmark results. A test failure means a number moved, which is either a regression or an improvement -- decide which, then re-record deliberately with tools/record_baselines.py.",
+    "recorded_utc": "2026-08-20T13:34:26+00:00",
+    "pycfd_version": "1.0.0",
+    "git_commit": "170aca3+",
+    "platform": "macOS-26.5-arm64-arm-64bit",
+    "python": "3.12.0",
+    "determinism": "Verified bit-identical across repeated runs on the recording platform; tolerances in test_regression.py allow for cross-platform float variation."
+  },
+  "fast": {
+    "taylor_green_convergence": {
+      "params": {
+        "resolutions": [
+          16,
+          32,
+          64,
+          128
+        ]
+      },
+      "metrics": {
+        "observed_order_L2": 1.999669973940691,
+        "observed_order_Linf": 1.9965084715978074,
+        "finest_L2": 4.77475461891742e-06,
+        "finest_Linf": 9.558930812225697e-06
+      },
+      "seconds": 1.3
+    },
+    "channel_periodic": {
+      "params": {
+        "re": 10,
+        "nx": 16,
+        "ny": 32,
+        "mode": "periodic"
+      },
+      "metrics": {
+        "centerline_error_pct": 1.0090861479739033e-07,
+        "profile_L2_relative": 0.0009104384738361293,
+        "u_max_numerical": 0.9999999989909139,
+        "mean_velocity": 0.6679687493565628,
+        "max_divergence": 0.0,
+        "steps": 5722,
+        "final_time": 21.036764705883428
+      },
+      "seconds": 1.9
+    },
+    "channel_developing": {
+      "params": {
+        "re": 10,
+        "nx": 48,
+        "ny": 24,
+        "mode": "developing"
+      },
+      "metrics": {
+        "centerline_error_pct": 0.002499413032156876,
+        "profile_L2_relative": 0.0023089094005366083,
+        "u_max_numerical": 1.4999625088045176,
+        "mean_velocity": 0.9999999999999997,
+        "max_divergence": 3.064215547965432e-13,
+        "steps": 447,
+        "final_time": 2.793750000000023
+      },
+      "seconds": 0.2
+    },
+    "cavity_re100": {
+      "params": {
+        "re": 100,
+        "nx": 48,
+        "ny": 48
+      },
+      "metrics": {
+        "ghia_u_L2": 0.01698814301051285,
+        "ghia_u_Linf": 0.06935902762975821,
+        "ghia_v_L2": 0.008059260315997074,
+        "ghia_v_Linf": 0.0204928114358639,
+        "max_divergence": 6.20350125435376e-14,
+        "steps": 3847,
+        "final_time": 22.093407698376012,
+        "reached_steady_state": 1.0
+      },
+      "seconds": 2.8
+    },
+    "cylinder_re20": {
+      "params": {
+        "re": 20,
+        "nx": 128,
+        "ny": 64,
+        "t_end": 20.0
+      },
+      "metrics": {
+        "cd_mean": 2.471423208774098,
+        "cl_rms": 7.868948886398624e-16,
+        "characteristic_length": 1.0,
+        "blockage_ratio": 0.125,
+        "max_divergence": 3.7192471324942744e-15,
+        "steps": 1001,
+        "final_time": 20.0
+      },
+      "seconds": 2.0
+    }
+  },
+  "full": {
+    "channel_periodic_full": {
+      "params": {
+        "re": 10,
+        "nx": 32,
+        "ny": 64,
+        "mode": "periodic"
+      },
+      "metrics": {
+        "centerline_error_pct": 1.0130034588939907e-07,
+        "profile_L2_relative": 0.00022818161127642866,
+        "max_divergence": 0.0,
+        "steps": 22870
+      },
+      "seconds": 14.9
+    },
+    "channel_developing_full": {
+      "params": {
+        "re": 10,
+        "nx": 96,
+        "ny": 48,
+        "mode": "developing"
+      },
+      "metrics": {
+        "centerline_error_pct": 0.10118697058312993,
+        "profile_L2_relative": 0.0015513264366048612,
+        "max_divergence": 3.320010932839068e-12,
+        "steps": 1768
+      },
+      "seconds": 2.4
+    },
+    "cavity_re100_full": {
+      "params": {
+        "re": 100,
+        "nx": 128,
+        "ny": 128
+      },
+      "metrics": {
+        "ghia_u_L2": 0.006666347306871988,
+        "ghia_u_Linf": 0.025689443483192687,
+        "ghia_v_L2": 0.005332912643236642,
+        "ghia_v_Linf": 0.009120649538648329,
+        "max_divergence": 9.109146813582325e-14,
+        "steps": 18085
+      },
+      "seconds": 82.7
+    },
+    "cavity_re400_full": {
+      "params": {
+        "re": 400,
+        "nx": 128,
+        "ny": 128
+      },
+      "metrics": {
+        "ghia_u_L2": 0.009757799504986826,
+        "ghia_u_Linf": 0.03951024265832659,
+        "ghia_v_L2": 0.005718659333616433,
+        "ghia_v_Linf": 0.016583580265198627,
+        "max_divergence": 3.6415315207705135e-14,
+        "steps": 25612
+      },
+      "seconds": 117.2
+    },
+    "cavity_re1000_full": {
+      "params": {
+        "re": 1000,
+        "nx": 128,
+        "ny": 128
+      },
+      "metrics": {
+        "ghia_u_L2": 0.014895620056576055,
+        "ghia_u_Linf": 0.05879943526689868,
+        "ghia_v_L2": 0.010438593262621343,
+        "ghia_v_Linf": 0.029259348794328663,
+        "max_divergence": 5.102342159890583e-14,
+        "steps": 57637
+      },
+      "seconds": 263.8
+    },
+    "cylinder_re20_full": {
+      "params": {
+        "re": 20,
+        "nx": 256,
+        "ny": 128
+      },
+      "metrics": {
+        "cd_mean": 2.537200088909709,
+        "cl_rms": 5.640813215147397e-16,
+        "max_divergence": 7.327471962526033e-15,
+        "steps": 3033
+      },
+      "seconds": 29.1
+    }
+  }
+}
