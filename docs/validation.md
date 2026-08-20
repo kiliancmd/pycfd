@@ -26,6 +26,12 @@ dominates cleanly.
 python -m pycfd.main --convergence
 ```
 
+This is the only case with an exact solution, and so the only one that can
+report a true order of accuracy. Any other case can still be refined and
+watched — see [grid-refinement studies](usage.md#grid-refinement-studies) —
+but a body with no reference to be wrong against gets a verdict on whether its
+numbers stopped moving, not an extrapolated order.
+
 ### Lid-driven cavity vs Ghia et al. (1982)
 
 Centreline profiles at 128×128, run to steady state.

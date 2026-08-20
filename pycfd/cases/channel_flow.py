@@ -43,6 +43,13 @@ CHANNEL_LENGTH = 2.0
 
 STEADY_TOLERANCE = 1.0e-9
 
+#: What a grid study on this case should watch.  Both are errors against the
+#: analytical Poiseuille parabola, so an observed order is meaningful.
+CONVERGENCE_METRICS = {
+    "profile_L2_relative": "error",
+    "centerline_error_pct": "error",
+}
+
 #: Relative L2 agreement with the analytical parabola that counts as a pass.
 POISEUILLE_TOLERANCE = 0.02
 

@@ -43,13 +43,24 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    p.add_argument("--case", default="cavity",
+    # Left unset so that --convergence can keep meaning the Taylor-Green study,
+    # which is the one with an exact solution and the one the published
+    # second-order number comes from.  Resolved in main().
+    p.add_argument("--case", default=None,
                    choices=sorted(available_cases()),
-                   help="benchmark case to run")
+                   help="benchmark case to run (default: cavity, or "
+                        "taylor_green with --convergence)")
     p.add_argument("--list-cases", action="store_true",
                    help="list the available benchmark cases and exit")
     p.add_argument("--convergence", action="store_true",
-                   help="run the Taylor-Green grid-convergence study and exit")
+                   help="run a grid-refinement study on --case and exit. "
+                        "taylor_green measures the true error against its exact "
+                        "solution; every other case tracks the metrics it "
+                        "declares and reports whether they have stopped moving")
+    p.add_argument("--resolutions", default=None, metavar="N,N,N",
+                   help="cell counts for --convergence, coarsest first "
+                        "(default: 16,32,64,128 for taylor_green, 32,64,128 "
+                        "otherwise). The case's own aspect ratio is preserved")
 
     grid = p.add_argument_group("grid and physics")
     grid.add_argument("--re", type=float, default=None, help="Reynolds number")
@@ -351,6 +362,51 @@ def run_live(args: argparse.Namespace) -> int:
 #: 2 = could not run (bad configuration, divergence, unimplemented option).
 EXIT_OK, EXIT_VALIDATION_FAILED, EXIT_ERROR = 0, 1, 2
 
+#: Resolutions the Taylor--Green study uses when none are named.  It starts
+#: coarser than the general default because it has an exact solution to measure
+#: against, so even a 16-cell grid produces a meaningful error.
+TAYLOR_GREEN_RESOLUTIONS = (16, 32, 64, 128)
+
+
+def run_convergence_study(args: argparse.Namespace) -> int:
+    """Refine ``--case`` over ``--resolutions`` and report what moved.
+
+    Taylor--Green keeps its own path: it is the one case with an exact
+    solution, so it can measure a true error field rather than watch a reported
+    number settle, and it is the study the published second-order result comes
+    from.  Every other case goes through the general one.
+    """
+    from .cases import DEFAULT_RESOLUTIONS, grid_study, parse_resolutions
+
+    resolutions = (None if args.resolutions is None
+                   else parse_resolutions(args.resolutions))
+    study_kwargs = {k: v for k, v in case_kwargs(args).items()
+                    if k not in ("nx", "ny", "name")}
+
+    if args.case == "taylor_green":
+        study_kwargs.pop("mode", None)
+        result = load_case("taylor_green").run_convergence(
+            resolutions=resolutions or TAYLOR_GREEN_RESOLUTIONS,
+            outdir=Path(args.outdir) / "convergence",
+            make_plots=not args.no_plots, progress=args.progress,
+            **{k: v for k, v in study_kwargs.items() if k in ("re", "t_end")},
+        )
+        print()
+        print(result.report())
+        for norm, table in getattr(result, "tables", {}).items():
+            print(f"\n  {norm} refinement table:")
+            print("\n".join("    " + line for line in table.table().splitlines()))
+        return EXIT_OK if result.passed else EXIT_VALIDATION_FAILED
+
+    if args.case != "channel":
+        study_kwargs.pop("mode", None)
+    study_kwargs.update(case_specific_kwargs(args))
+    study = grid_study(args.case, resolutions or DEFAULT_RESOLUTIONS,
+                       progress=args.progress, **study_kwargs)
+    print()
+    print(study.report())
+    return EXIT_OK if study.passed else EXIT_VALIDATION_FAILED
+
 
 def run_resume(args: argparse.Namespace) -> int:
     """Continue a checkpointed run headlessly.
@@ -398,6 +454,8 @@ def run_resume(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point.  Returns a process exit code."""
     args = build_parser().parse_args(argv)
+    if args.case is None:
+        args.case = "taylor_green" if args.convergence else "cavity"
     configure_logging(args.verbose, args.quiet)
     try:
         return _run(args)
@@ -431,17 +489,7 @@ def _run(args: argparse.Namespace) -> int:
         use_headless_backend()
 
     if args.convergence:
-        module = load_case("taylor_green")
-        result = module.run_convergence(outdir=Path(args.outdir) / "convergence",
-                                        make_plots=not args.no_plots,
-                                        progress=args.progress)
-        print()
-        print(result.report())
-        tables = getattr(result, "tables", {})
-        for norm, study in tables.items():
-            print(f"\n  {norm} refinement table:")
-            print("\n".join("    " + line for line in study.table().splitlines()))
-        return EXIT_OK if result.passed else EXIT_VALIDATION_FAILED
+        return run_convergence_study(args)
 
     if args.live:
         return run_live(args)

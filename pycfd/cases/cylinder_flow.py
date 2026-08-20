@@ -68,6 +68,13 @@ REFERENCE_ST = {100: (0.160, 0.172)}
 #: Fraction of the record discarded before averaging force coefficients.
 TRANSIENT_FRACTION = 0.5
 
+#: What a grid study on this case should watch.  Both are *measured
+#: quantities*, not errors: an immersed boundary on a Cartesian grid has no
+#: exact answer to be wrong against, so refinement can only be checked by
+#: whether the numbers stop moving -- which is exactly what the F-22 sweep
+#: found they had not, between 5, 10 and 20 cells across the body.
+CONVERGENCE_METRICS = {"cd_mean": "quantity", "cl_rms": "quantity"}
+
 
 def flight_scaling(wind_speed: float, altitude: float | None = None) -> Scaling:
     """The solver-to-SI exchange rate implied by a speed and an altitude.

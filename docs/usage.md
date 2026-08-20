@@ -508,7 +508,8 @@ any file to launch a run. `python -m pycfd.main --help` prints the same list.
 |---|---|---|
 | `--case {cavity,channel,cylinder,taylor_green}` | `cavity` | which benchmark to run |
 | `--list-cases` | — | print the available cases and exit |
-| `--convergence` | — | run the Taylor–Green grid-convergence study and exit |
+| `--convergence` | — | run a grid-refinement study on `--case` and exit (defaults to `taylor_green`) |
+| `--resolutions N,N,N` | `16,32,64,128` (taylor_green), `32,64,128` | cell counts for the study, coarsest first |
 
 **Grid and physics**
 
@@ -591,6 +592,50 @@ also on `channel --mode developing`). Using one where it cannot apply is an
 
 Exit codes: `0` ran and validated, `1` ran but a validation check missed its
 tolerance, `2` could not run (bad configuration, divergence, unsupported flag).
+
+#### Grid-refinement studies
+
+`--convergence` refines whichever case `--case` names and reports what moved:
+
+```bash
+python -m pycfd.main --convergence                                    # Taylor–Green
+python -m pycfd.main --convergence --case cylinder --re 100 --resolutions 64,128,256
+```
+
+The two cases are not doing the same thing, and the report says which:
+
+| case | what it can measure | what you get |
+|---|---|---|
+| `taylor_green` | a true **error** — the exact unsteady solution is known | error at each grid, and an observed order of accuracy |
+| `cavity`, `channel` | a true **error** — against Ghia et al. and the analytical parabola | the same, per declared metric |
+| `cylinder` | nothing exact — an immersed boundary on a Cartesian grid has no reference | the values, and whether they stopped moving |
+
+A metric declared as a **quantity** rather than an error gets no observed
+order. That is deliberate: fitting one to a sequence with nothing to be wrong
+against is exactly how a study that never reached its asymptotic regime gets
+extrapolated as though it had. What it gets instead is the relative change
+between successive grids, and a verdict — *settled* when the two finest grids
+agree to within 2%, **STILL MOVING** otherwise. The exit code follows: `0` when
+every tracked metric settled, `1` when one did not.
+
+The case's own aspect ratio is preserved as the grid refines, so a 2:1 channel
+stays 2:1 rather than being squared into a different problem. Each case
+declares which of its numbers are worth refining against in
+`CONVERGENCE_METRICS`; only the case knows which are results and which are
+bookkeeping.
+
+```
+=== cylinder grid study (48, 64) ===
+  cd_mean  (quantity)
+       N          value     change
+      48        1.68308
+      64         2.3936     42.22%
+    STILL MOVING at 2% between the two finest grids
+```
+
+A quantity that is *structurally* zero — the lift on a symmetric steady wake —
+is not read as a grid refusing to converge; two different roundings of zero
+differ by tens of per cent and mean nothing.
 
 #### Worked recipes
 

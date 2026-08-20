@@ -3,11 +3,18 @@
 Each case module exposes ``build(...) -> Simulation`` and ``run(...) -> CaseResult``
 so the CLI can treat them uniformly.  ``build`` is separated out because the live
 viewer needs an un-run simulation to animate.
+
+A case may also declare ``CONVERGENCE_METRICS``, mapping the metrics worth
+refining against to what kind of quantity each is.  That is what lets
+:func:`grid_study` run a grid-refinement study on any case rather than only on
+the one with an exact solution.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -134,3 +141,187 @@ def load_case(name: str):
             f"unknown case {name!r}; available: {sorted(modules)}"
         )
     return import_module(f".{modules[name]}", package=__package__)
+
+
+# --------------------------------------------------------------------------- #
+# Grid-refinement studies
+# --------------------------------------------------------------------------- #
+#: Resolutions used when none are named.
+DEFAULT_RESOLUTIONS = (32, 64, 128)
+
+#: Relative change between the two finest grids below which a metric is called
+#: settled.  Two per cent is an engineering judgement, not a theorem: it is
+#: small enough that a quantity still drifting at the 5-10% level -- which is
+#: what an under-resolved body looks like -- is reported as unconverged.
+SETTLED_TOLERANCE = 0.02
+
+#: A metric this small was never a measurement -- it is a quantity that is
+#: structurally zero, like the lift on a symmetric steady wake.  Comparing
+#: successive values of one relatively is meaningless: two different roundings
+#: of zero differ by tens of per cent and would be reported as a grid that
+#: refuses to converge.
+NOISE_FLOOR = 1.0e-9
+
+
+def parse_resolutions(text: str) -> tuple[int, ...]:
+    """Parse ``"64,128,256"`` into validated, increasing cell counts."""
+    parts = [p.strip() for p in str(text).replace(" ", ",").split(",") if p.strip()]
+    try:
+        values = tuple(int(p) for p in parts)
+    except ValueError:
+        raise ValueError(
+            f"resolutions must be a comma-separated list of integers, got {text!r}"
+        ) from None
+    if len(values) < 2:
+        raise ValueError(
+            f"a refinement study needs at least two resolutions, got {list(values)}"
+        )
+    if any(n < 4 for n in values):
+        raise ValueError(f"every resolution must be at least 4, got {list(values)}")
+    if any(b <= a for a, b in zip(values, values[1:])):
+        raise ValueError(
+            f"resolutions must increase, got {list(values)}; the study reports the "
+            "order between successive grids and reads the finest pair as the "
+            "asymptotic estimate"
+        )
+    return values
+
+
+def case_aspect(case: str) -> float | None:
+    """The case's own ``ny / nx``, or ``None`` when it derives ``ny`` itself.
+
+    Refining a study has to preserve the shape of the domain the case chose --
+    a channel is 1:2 and a cylinder 2:1, and squaring either of them would be a
+    different problem, not a finer one.
+    """
+    params = inspect.signature(load_case(case).run).parameters
+    nx = params["nx"].default if "nx" in params else None
+    ny = params["ny"].default if "ny" in params else None
+    if not isinstance(nx, int) or not isinstance(ny, int):
+        return None
+    return ny / nx
+
+
+@dataclass
+class GridStudy:
+    """How a case's reported metrics behave under grid refinement.
+
+    ``values`` holds one number per resolution for each tracked metric, and
+    ``kinds`` says what each metric is: an ``"error"`` against a known reference
+    -- for which an observed order of accuracy is meaningful -- or a
+    ``"quantity"`` the run measures with nothing to compare against, which can
+    only be watched to stop moving.
+    """
+
+    case: str
+    resolutions: list[int]
+    values: dict[str, list[float]]
+    kinds: dict[str, str]
+
+    def changes(self, metric: str) -> list[float]:
+        """Relative change between each successive pair of grids.
+
+        A pair that is structurally zero on both grids counts as no change at
+        all -- see :data:`NOISE_FLOOR`.
+        """
+        series = self.values[metric]
+        out = []
+        for a, b in zip(series, series[1:]):
+            if abs(a) < NOISE_FLOOR and abs(b) < NOISE_FLOOR:
+                out.append(0.0)
+            elif a:
+                out.append(abs(b - a) / abs(a))
+            else:
+                out.append(float("nan"))
+        return out
+
+    def observed_order(self, metric: str) -> float:
+        """Order of accuracy from the two finest grids, for an error metric.
+
+        ``nan`` for a measured quantity: without a reference there is no error
+        to halve, and fitting an order to one anyway is how a sequence that
+        never entered its asymptotic regime gets extrapolated as though it had.
+        """
+        if self.kinds.get(metric) != "error":
+            return float("nan")
+        from ..analysis.validation import convergence_order
+
+        return convergence_order(self.resolutions, self.values[metric],
+                                 metric).observed_order
+
+    def settled(self, metric: str, tol: float = SETTLED_TOLERANCE) -> bool:
+        """Whether the finest pair of grids agree to within ``tol``."""
+        changes = self.changes(metric)
+        return bool(changes) and math.isfinite(changes[-1]) and changes[-1] <= tol
+
+    @property
+    def passed(self) -> bool:
+        """True when every tracked metric has settled."""
+        return all(self.settled(m) for m in self.values)
+
+    def table(self) -> str:
+        """One block per metric: value at each grid, change, and order."""
+        lines = []
+        for metric, series in self.values.items():
+            kind = self.kinds.get(metric, "quantity")
+            lines.append(f"  {metric}  ({kind})")
+            lines.append(f"    {'N':>6} {'value':>14} {'change':>10}")
+            changes = self.changes(metric)
+            for k, (n, value) in enumerate(zip(self.resolutions, series)):
+                change = "" if k == 0 else f"{changes[k - 1] * 100:9.2f}%"
+                lines.append(f"    {n:6d} {value:14.6g} {change:>10}")
+            order = self.observed_order(metric)
+            if math.isfinite(order):
+                lines.append(f"    observed order (finest pair): {order:.3f}")
+            verdict = "settled" if self.settled(metric) else "STILL MOVING"
+            lines.append(f"    {verdict} at {SETTLED_TOLERANCE * 100:g}% "
+                         f"between the two finest grids")
+        return "\n".join(lines)
+
+    def report(self) -> str:
+        """Formatted summary for the console."""
+        head = (f"=== {self.case} grid study "
+                f"({', '.join(str(n) for n in self.resolutions)}) ===")
+        tail = ("  every tracked metric has settled" if self.passed else
+                "  at least one metric is still moving: refine further before "
+                "trusting it")
+        return "\n".join([head, self.table(), tail])
+
+
+def grid_study(case: str, resolutions=DEFAULT_RESOLUTIONS,
+               progress: bool = False, **kwargs) -> GridStudy:
+    """Run ``case`` at each resolution and track how its metrics move.
+
+    This is the general form of a convergence study: the Taylor--Green vortex
+    has an exact solution and so can report a true error, but every other case
+    can still be refined and watched.  Which metrics are worth watching is the
+    case's own declaration -- ``CONVERGENCE_METRICS`` in its module -- since
+    only the case knows which of its numbers are results and which are
+    bookkeeping.
+    """
+    module = load_case(case)
+    kinds = dict(getattr(module, "CONVERGENCE_METRICS", {}))
+    if not kinds:
+        raise ValueError(
+            f"case '{case}' does not declare CONVERGENCE_METRICS, so there is "
+            "nothing to refine it against; add the mapping to its module to "
+            "make it studiable"
+        )
+
+    aspect = case_aspect(case)
+    values: dict[str, list[float]] = {m: [] for m in kinds}
+    for n in resolutions:
+        extra = {} if aspect is None else {"ny": max(4, round(n * aspect))}
+        result = module.run(nx=n, make_plots=False, progress=progress,
+                            **extra, **kwargs)
+        for metric in kinds:
+            if metric not in result.metrics:
+                raise ValueError(
+                    f"case '{case}' declares '{metric}' as a convergence metric "
+                    f"but did not report it at N={n}"
+                )
+            values[metric].append(float(result.metrics[metric]))
+        log.info("N=%d: %s", n,
+                 "  ".join(f"{m}={values[m][-1]:.6g}" for m in kinds))
+
+    return GridStudy(case, [int(n) for n in resolutions], values, kinds)

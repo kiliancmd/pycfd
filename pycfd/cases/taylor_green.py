@@ -51,6 +51,13 @@ STUDY_COURANT = 0.4
 #: Order that counts as a pass for the second-order scheme.
 MIN_OBSERVED_ORDER = 1.8
 
+#: What a grid study on this case should watch.  Both are errors against the
+#: exact unsteady solution.  ``run_convergence`` below is the richer path for
+#: this case -- it measures the error field itself rather than reading a
+#: reported number -- but declaring these keeps the generic study working here
+#: too, which is what makes the two comparable.
+CONVERGENCE_METRICS = {"L2": "error", "Linf": "error"}
+
 PERIODIC_BCS = {w: BCSpec(BCKind.PERIODIC) for w in ("left", "right", "bottom", "top")}
 
 

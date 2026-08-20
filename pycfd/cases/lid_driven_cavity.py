@@ -40,6 +40,11 @@ STEADY_TOLERANCE = 1.0e-6
 #: about the most a uniform-grid second-order code can be asked for.
 GHIA_L2_TOLERANCE = 0.02
 
+#: What a grid study on this case should watch.  Both are errors against Ghia
+#: et al.'s tabulated profiles, so refinement should *reduce* them and an
+#: observed order of accuracy is meaningful.
+CONVERGENCE_METRICS = {"ghia_u_L2": "error", "ghia_v_L2": "error"}
+
 
 def default_end_time(re: float) -> float:
     """Integration time that comfortably reaches steady state at this Reynolds number.
