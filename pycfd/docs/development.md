@@ -88,11 +88,32 @@ and on demand:
   installed `numpy` / `scipy` / `matplotlib` / `numba` versions are printed
   before the run, which makes a platform-specific baseline failure diagnosable
   from the log alone.
-- **benchmarks** — the full-fidelity regressions, skipped on pull requests
-  because they cost several minutes of solver time.
+- **benchmarks** — the full-fidelity regressions. **Opt-in only**: tick
+  *Also rerun the benchmarks at their published resolutions* when starting a run
+  from the Actions tab. It never fires on a push.
 
 No install step is needed: `pycfd/conftest.py` puts the repository root on
 `sys.path`, so a fresh checkout runs directly.
+
+### Why the benchmarks are opt-in
+
+They cost minutes of solver time on a warm 8-core laptop and considerably more
+on a shared two-core runner — the first automatic attempt ran for 64 minutes
+without finishing and had to be cancelled by hand. Since the fast tier already
+covers the same cases on every push, only the *published numbers* need the
+expensive rerun, and that is worth asking for explicitly: after a numerics
+change, or before tagging a release.
+
+Both jobs carry a `timeout-minutes` so a hang fails loudly rather than
+occupying a runner for GitHub's six-hour default. The benchmark job's 90-minute
+bound is deliberately generous because nobody has yet seen it finish on a
+runner; it runs pytest with `--durations=0`, so the first completed run
+replaces that guess with a measurement and the bound can be tightened.
+
+The concurrency key includes the event name. Without that, pushing to `main`
+while a hand-requested benchmark run was in flight would cancel it — which is
+exactly what `cancel-in-progress` is supposed to do for redundant pushes, and
+exactly what it must not do to a run someone deliberately started.
 
 ## Provenance in outputs
 

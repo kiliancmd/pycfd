@@ -5,16 +5,28 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_benchmarks:
+        description: >-
+          Also rerun the benchmarks at their published resolutions.
+          Minutes of solver time -- opt in when numerics changed.
+        type: boolean
+        default: false
 
 concurrency:
-  # A new push supersedes an in-flight run of the same branch.
-  group: tests-${{ github.ref }}
+  # A new push supersedes an in-flight run of the same branch. The event name is
+  # part of the key so that a push cannot cancel a benchmark run someone asked
+  # for by hand -- those are long, deliberate, and worth protecting.
+  group: tests-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
   suite:
     name: python ${{ matrix.python }}
     runs-on: ubuntu-latest
+    # Roughly 90 s in practice; this only exists so a hang fails loudly instead
+    # of sitting on a runner for GitHub's six-hour default.
+    timeout-minutes: 15
     strategy:
       # One version failing should not hide the result of the others.
       fail-fast: false
@@ -54,9 +66,15 @@ jobs:
   benchmarks:
     name: full-fidelity benchmarks
     runs-on: ubuntu-latest
-    # Several minutes of solver time, so this runs on main and on demand rather
-    # than on every pull request.
-    if: github.event_name != 'pull_request'
+    # Opt-in only. This reruns the cases at the resolutions docs/validation.md
+    # quotes, which is minutes of solver time on a warm 8-core laptop and
+    # considerably more on a shared two-core runner. It ran for 64 minutes
+    # without finishing on its first automatic attempt, so it no longer fires on
+    # push: request it from the Actions tab when the numerics change or before
+    # tagging a release. The fast tier on every push already covers the same
+    # cases at reduced resolution.
+    if: github.event_name == 'workflow_dispatch' && inputs.run_benchmarks
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -74,4 +92,7 @@ jobs:
       - name: Run benchmark regressions at published resolutions
         env:
           MPLBACKEND: Agg
-        run: python -m pytest pycfd/tests/test_regression.py --runslow -q
+        # --durations reports every case's wall time. The first completed run
+        # tells us what this actually costs on a runner, which is the number
+        # needed to tighten the timeout above from a guess to a measurement.
+        run: python -m pytest pycfd/tests/test_regression.py --runslow -q --durations=0
