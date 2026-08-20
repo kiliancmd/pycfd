@@ -40,12 +40,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: pycfd/requirements.txt
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r pycfd/requirements.txt
+          python -m pip install -r requirements.txt
 
       - name: Report the environment
         # Numerical results depend on these; printing them makes a
@@ -82,12 +82,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: pycfd/requirements.txt
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r pycfd/requirements.txt
+          python -m pip install -r requirements.txt
 
       - name: Run benchmark regressions at published resolutions
         env:

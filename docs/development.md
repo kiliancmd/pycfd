@@ -152,6 +152,14 @@ imply a reproducibility it does not have.
 ## Architecture
 
 ```
+.
+├── README.md            Project front page
+├── requirements.txt     numpy, scipy, matplotlib, numba, tqdm
+├── docs/                This guide and its siblings
+├── tools/               record_baselines.py
+├── .github/workflows/   tests.yml
+└── pycfd/               The package itself
+
 pycfd/
 ├── core/
 │   ├── mesh.py          Structured mesh; the MAC index convention lives here
@@ -181,10 +189,10 @@ pycfd/
 └── main.py              CLI
 ```
 
-Two directories sit outside the package. `pycfd/docs/` holds this guide and its
-siblings, alongside the README they belong to. The repository root — one level
-above `pycfd/` — holds `.github/workflows/tests.yml`, which GitHub requires
-there, and `tools/record_baselines.py`.
+`pycfd/` holds nothing but the package, so everything importable is under one
+roof and everything else — the README GitHub renders, the docs, the CI
+workflow, the baseline recorder — sits at the repository root where each is
+conventionally looked for.
 
 Two structural notes against the original specification: `core/fields.py` was
 added so that `boundary.py` can operate on a field bundle without importing the

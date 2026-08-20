@@ -1,5 +1,7 @@
 # pycfd
 
+[![tests](https://github.com/kiliancmd/pycfd/actions/workflows/tests.yml/badge.svg)](https://github.com/kiliancmd/pycfd/actions/workflows/tests.yml)
+
 A 2D incompressible Navier–Stokes solver built around Chorin's projection method
 on a staggered (MAC) grid. It runs the classic benchmarks — lid-driven cavity,
 Poiseuille channel, flow past a cylinder, Taylor–Green vortex — with live
@@ -17,10 +19,13 @@ industrial turbulence modelling.
 ## Installation
 
 ```bash
+git clone https://github.com/kiliancmd/pycfd.git
+cd pycfd
 pip install -r requirements.txt
 ```
 
-Requires Python 3.10+. `numba` and `tqdm` are optional — the solver falls back to
+Requires Python 3.10+. There is no install step: run `python -m pycfd.main` from
+the repository root. `numba` and `tqdm` are optional — the solver falls back to
 pure NumPy stencils and a silent run if they are missing.
 
 ## Quickstart
@@ -97,8 +102,6 @@ against a published −0.1034.
 
 ---
 
----
-
 ## Documentation
 
 | guide | what it covers |
@@ -134,3 +137,15 @@ alongside. So a result found later can always answer *what made this*:
 python -c "import json; print(json.load(open('results/run.provenance.json'))['command'])"
 # python -m pycfd.main --case cylinder --re 100 --geometry shield.csv --name run
 ```
+
+## Repository layout
+
+| path | contents |
+|---|---|
+| `pycfd/` | the package — solver core, cases, geometry, analysis, visualisation, tests |
+| `docs/` | the five guides linked above |
+| `tools/` | `record_baselines.py`, the deliberate re-recording step for regression baselines |
+| `.github/workflows/` | the test matrix that runs on every push |
+
+Run the suite with `python -m pytest pycfd/tests -q`; see
+[Development](docs/development.md) for the two-tier benchmark setup.
