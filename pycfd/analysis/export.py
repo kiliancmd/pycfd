@@ -4,6 +4,19 @@ All exporters work from cell-centred data so that every quantity shares one
 grid, which is what external tools expect.  The staggered face values are
 interpolated to centres on the way out; checkpoints instead store the raw
 ghosted arrays so a resumed run continues bit-for-bit.
+
+Units
+-----
+Exports carry the solver's own non-dimensional scales by default.  Passing a
+:class:`~pycfd.units.Scaling` converts the whole bundle -- coordinates,
+velocities, pressure, vorticity and the time stamp -- into SI on the way out,
+and says so: the CSV header gains unit suffixes, the VTK title records the
+scaling, and the sidecar carries a ``units`` block either way.  A file whose
+numbers are in pascals should not look identical to one whose numbers are not.
+
+Checkpoints are deliberately *not* rescalable.  They exist to restart a run
+bit-for-bit, and the solver restarts in solver units; a checkpoint written in
+SI would be a file that looks resumable and is not.
 """
 
 from __future__ import annotations
@@ -20,24 +33,70 @@ from ..core.mesh import StructuredMesh
 from .postprocess import vorticity
 from .provenance import provenance_record, summary_line, write_sidecar
 
+#: Column -> SI unit, used to label a rescaled export.
+SI_UNITS = {
+    "x": "m", "y": "m",
+    "u": "m_s", "v": "m_s", "speed": "m_s",
+    "pressure": "Pa", "vorticity": "1_s",
+}
 
-def _cell_data(fields: FlowField) -> dict[str, np.ndarray]:
-    """Cell-centred bundle shared by the VTK and CSV writers."""
+
+def _cell_data(fields: FlowField, scaling=None) -> dict[str, np.ndarray]:
+    """Cell-centred bundle shared by the VTK and CSV writers.
+
+    With ``scaling``, every quantity is converted to SI through its own scale --
+    a velocity by ``V``, a pressure by ``rho V^2``, a vorticity by ``V / L``.
+    """
     uc, vc = fields.cell_velocities()
-    return {
+    data = {
         "u": uc,
         "v": vc,
         "speed": np.hypot(uc, vc),
         "pressure": fields.p_phys,
         "vorticity": vorticity(fields),
     }
+    if scaling is None:
+        return data
+    return {
+        "u": scaling.to_speed(data["u"]),
+        "v": scaling.to_speed(data["v"]),
+        "speed": scaling.to_speed(data["speed"]),
+        "pressure": scaling.to_pascals(data["pressure"]),
+        "vorticity": scaling.to_vorticity(data["vorticity"]),
+    }
+
+
+def _units_record(scaling=None) -> dict:
+    """The ``units`` block written into every sidecar.
+
+    Recorded even when nothing was rescaled, so a reader never has to infer
+    which convention a file is in from the numbers themselves.
+    """
+    if scaling is None:
+        return {"system": "solver", "note": "non-dimensional; u_ref = l_ref = 1"}
+    return {
+        "system": "SI",
+        "reference_speed_m_s": scaling.speed,
+        "reference_length_m": scaling.length,
+        "density_kg_m3": scaling.density,
+        "time_scale_s": scaling.time_scale,
+        "pressure_scale_pa": scaling.pressure_scale,
+        "columns": dict(SI_UNITS),
+    }
+
+
+def _with_units(record: dict, scaling=None) -> dict:
+    """A copy of ``record`` carrying the units its file is written in."""
+    out = dict(record)
+    out["units"] = _units_record(scaling)
+    return out
 
 
 # --------------------------------------------------------------------------- #
 # VTK
 # --------------------------------------------------------------------------- #
 def export_vtk(fields: FlowField, path: str | Path, name: str = "pycfd",
-               provenance: dict | None = None) -> Path:
+               provenance: dict | None = None, scaling=None) -> Path:
     """Write a legacy ASCII VTK ``RECTILINEAR_GRID`` file.
 
     Cell-centre coordinates become grid points carrying ``POINT_DATA``, which is
@@ -45,13 +104,20 @@ def export_vtk(fields: FlowField, path: str | Path, name: str = "pycfd",
     written directly so the package needs no ``vtk`` dependency.
 
     The format's single free-text title line carries a provenance digest, and
-    the full record is written to a ``.provenance.json`` sidecar.
+    the full record is written to a ``.provenance.json`` sidecar.  With a
+    ``scaling``, the fields and the coordinates are written in SI and the title
+    says so.
     """
     path = Path(path)
-    record = provenance_record() if provenance is None else provenance
+    record = _with_units(provenance_record() if provenance is None else provenance,
+                         scaling)
     path.parent.mkdir(parents=True, exist_ok=True)
     mesh = fields.mesh
-    data = _cell_data(fields)
+    data = _cell_data(fields, scaling)
+    xc = mesh.xc if scaling is None else scaling.to_length(mesh.xc)
+    yc = mesh.yc if scaling is None else scaling.to_length(mesh.yc)
+    t = fields.t if scaling is None else scaling.to_seconds(fields.t)
+    units = "SI" if scaling is not None else "solver units"
     nx, ny = mesh.shape
 
     def flat(a: np.ndarray) -> np.ndarray:
@@ -61,14 +127,14 @@ def export_vtk(fields: FlowField, path: str | Path, name: str = "pycfd",
     with path.open("w", encoding="ascii") as fh:
         fh.write("# vtk DataFile Version 3.0\n")
         # The title is the one free-text slot the legacy format offers.
-        fh.write(f"{name} t={fields.t:.6g} step={fields.step} "
-                 f"[{summary_line(record, limit=180)}]\n")
+        fh.write(f"{name} t={t:.6g} step={fields.step} {units} "
+                 f"[{summary_line(record, limit=170)}]\n")
         fh.write("ASCII\nDATASET RECTILINEAR_GRID\n")
         fh.write(f"DIMENSIONS {nx} {ny} 1\n")
         fh.write(f"X_COORDINATES {nx} float\n")
-        fh.write(" ".join(f"{x:.7g}" for x in mesh.xc) + "\n")
+        fh.write(" ".join(f"{x:.7g}" for x in xc) + "\n")
         fh.write(f"Y_COORDINATES {ny} float\n")
-        fh.write(" ".join(f"{y:.7g}" for y in mesh.yc) + "\n")
+        fh.write(" ".join(f"{y:.7g}" for y in yc) + "\n")
         fh.write("Z_COORDINATES 1 float\n0\n")
         fh.write(f"POINT_DATA {nx * ny}\n")
 
@@ -88,26 +154,36 @@ def export_vtk(fields: FlowField, path: str | Path, name: str = "pycfd",
 # CSV
 # --------------------------------------------------------------------------- #
 def export_csv(fields: FlowField, path: str | Path,
-               provenance: dict | None = None) -> Path:
+               provenance: dict | None = None, scaling=None) -> Path:
     """Write one row per cell: ``x, y, u, v, speed, pressure, vorticity``.
 
     The file itself stays pure data -- a comment banner would break readers that
     do not expect one -- so provenance goes to a ``.provenance.json`` sidecar.
+
+    With a ``scaling`` the values are written in SI and every column name gains
+    its unit (``pressure_Pa``, ``u_m_s``), since a spreadsheet is opened without
+    the sidecar in view and a column of pascals must not be mistaken for one of
+    the solver's dimensionless numbers.
     """
     path = Path(path)
-    record = provenance_record() if provenance is None else provenance
+    record = _with_units(provenance_record() if provenance is None else provenance,
+                         scaling)
     path.parent.mkdir(parents=True, exist_ok=True)
     mesh = fields.mesh
-    data = _cell_data(fields)
+    data = _cell_data(fields, scaling)
     X, Y = mesh.cell_center_grid()
+    if scaling is not None:
+        X, Y = scaling.to_length(X), scaling.to_length(Y)
 
     columns = ["x", "y", "u", "v", "speed", "pressure", "vorticity"]
+    header = (columns if scaling is None
+              else [f"{c}_{SI_UNITS[c]}" for c in columns])
     stacked = np.column_stack(
         [X.ravel(), Y.ravel()] + [data[c].ravel() for c in columns[2:]]
     )
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(columns)
+        writer.writerow(header)
         for row in stacked:
             writer.writerow([f"{val:.9g}" for val in row])
     write_sidecar(path, record)
@@ -146,7 +222,8 @@ def save_checkpoint(fields: FlowField, config: SimulationConfig,
     if path.suffix != ".npz":
         path = path.with_suffix(".npz")
     path.parent.mkdir(parents=True, exist_ok=True)
-    record = provenance_record(config) if provenance is None else provenance
+    record = _with_units(
+        provenance_record(config) if provenance is None else provenance)
     np.savez_compressed(
         path,
         u=fields.u, v=fields.v, p=fields.p,

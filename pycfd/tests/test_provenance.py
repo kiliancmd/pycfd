@@ -211,3 +211,124 @@ def test_simulation_exports_carry_the_configuration(tmp_path):
     record = json.loads((tmp_path / "f.provenance.json").read_text())
     assert record["config"]["name"] == "prov_case"
     assert record["config"]["boundary_config"]["top"]["kind"] == BCKind.MOVING_WALL.value
+
+
+# --------------------------------------------------------------------------- #
+# Rescaled exports
+# --------------------------------------------------------------------------- #
+# --rescale-to writes the field exports in SI while the checkpoint stays in
+# solver units, so the two must never be mistaken for one another -- not by
+# their contents, their column names, their sidecars or their filenames.
+def si_scaling():
+    from pycfd.units import Scaling
+
+    return Scaling.at_altitude(70.0, length=2.0, altitude=3000.0)
+
+
+def test_unrescaled_exports_are_unchanged_and_say_so(tmp_path, stepped):
+    _, fields = stepped
+    export_csv(fields, tmp_path / "plain.csv")
+    header = (tmp_path / "plain.csv").read_text().splitlines()[0]
+
+    assert header == "x,y,u,v,speed,pressure,vorticity"
+    record = json.loads((tmp_path / "plain.provenance.json").read_text())
+    assert record["units"]["system"] == "solver"
+
+
+def test_a_rescaled_csv_labels_every_column_with_its_unit(tmp_path, stepped):
+    _, fields = stepped
+    export_csv(fields, tmp_path / "si.csv", scaling=si_scaling())
+    header = (tmp_path / "si.csv").read_text().splitlines()[0]
+
+    assert header == "x_m,y_m,u_m_s,v_m_s,speed_m_s,pressure_Pa,vorticity_1_s"
+
+
+def test_a_rescaled_csv_holds_si_values(tmp_path, stepped):
+    """Each column converts through its own scale, not one blanket factor."""
+    _, fields = stepped
+    s = si_scaling()
+    export_csv(fields, tmp_path / "plain.csv")
+    export_csv(fields, tmp_path / "si.csv", scaling=s)
+
+    def column(name, path):
+        lines = (path).read_text().splitlines()
+        idx = lines[0].split(",").index(name)
+        return np.array([float(line.split(",")[idx]) for line in lines[1:]])
+
+    plain_u = column("u", tmp_path / "plain.csv")
+    plain_p = column("pressure", tmp_path / "plain.csv")
+    plain_x = column("x", tmp_path / "plain.csv")
+    assert column("u_m_s", tmp_path / "si.csv") == pytest.approx(plain_u * s.speed)
+    assert column("pressure_Pa", tmp_path / "si.csv") == pytest.approx(
+        plain_p * s.pressure_scale)
+    assert column("x_m", tmp_path / "si.csv") == pytest.approx(plain_x * s.length)
+
+
+def test_a_rescaled_sidecar_records_the_exchange_rate(tmp_path, stepped):
+    """Enough to undo the conversion, so the file is not a dead end."""
+    _, fields = stepped
+    s = si_scaling()
+    export_csv(fields, tmp_path / "si.csv", scaling=s)
+    units = json.loads((tmp_path / "si.provenance.json").read_text())["units"]
+
+    assert units["system"] == "SI"
+    assert units["reference_speed_m_s"] == pytest.approx(s.speed)
+    assert units["reference_length_m"] == pytest.approx(s.length)
+    assert units["density_kg_m3"] == pytest.approx(s.density)
+    assert units["columns"]["pressure"] == "Pa"
+
+
+def test_a_rescaled_vtk_announces_its_units_in_the_title(tmp_path, stepped):
+    _, fields = stepped
+    export_vtk(fields, tmp_path / "si.vtk", scaling=si_scaling())
+    title = (tmp_path / "si.vtk").read_text().splitlines()[1]
+
+    assert " SI " in title
+    assert len(title) <= 256          # the legacy format's cap
+
+
+def test_a_rescaled_vtk_converts_the_time_stamp_too(tmp_path, stepped):
+    _, fields = stepped
+    s = si_scaling()
+    export_vtk(fields, tmp_path / "si.vtk", scaling=s)
+    title = (tmp_path / "si.vtk").read_text().splitlines()[1]
+
+    stamped = float(title.split("t=")[1].split()[0])
+    assert stamped == pytest.approx(s.to_seconds(fields.t), rel=1e-5)
+
+
+def test_a_checkpoint_is_never_rescaled(tmp_path, stepped):
+    """It restarts the solver, and the solver restarts in its own units."""
+    cfg, fields = stepped
+    save_checkpoint(fields, cfg, tmp_path / "state.npz")
+    restored, _ = load_checkpoint(tmp_path / "state.npz")
+
+    assert np.array_equal(restored.u, fields.u)
+    record = checkpoint_provenance(tmp_path / "state.npz")
+    assert record["units"]["system"] == "solver"
+
+
+def test_rescaled_and_plain_outputs_do_not_share_a_sidecar(tmp_path):
+    """The bug this naming exists to prevent: one file describing two others.
+
+    All three exporters map ``<name>.<ext>`` onto one ``<name>.provenance.json``,
+    so a rescaled field export and an unrescaled checkpoint written under the
+    same name would leave whichever ran last describing both.
+    """
+    from pycfd.main import build_parser, write_outputs
+    from pycfd.physics.incompressible import Simulation
+
+    sim = Simulation(cavity_config(nx=8, ny=8, t_end=0.01))
+    sim.run()
+    args = build_parser().parse_args(
+        ["--outdir", str(tmp_path), "--export-csv", "--checkpoint",
+         "--rescale-to", "70"]
+    )
+    written = write_outputs(sim, args, "run")
+
+    assert {p.name for p in written} == {"run_SI.csv", "run.npz"}
+    systems = {
+        p.name: json.loads(p.with_suffix(".provenance.json").read_text())["units"]["system"]
+        for p in written
+    }
+    assert systems == {"run_SI.csv": "SI", "run.npz": "solver"}

@@ -445,6 +445,32 @@ The report carries the dimensional facts alongside — `wind_speed_m_s`,
 `altitude_m`, `kinematic_viscosity`, `mach`, `dynamic_pressure_pa` — so the run
 records what it was a simulation *of*.
 
+**Writing results in SI.** `--rescale-to V` converts the field exports on the
+way out, so nothing has to be converted by hand afterwards:
+
+```bash
+python -m pycfd.main --case cylinder --geometry f22_side_profile.csv \
+    --l-ref 18.8 --wind-speed 70 --altitude 3000 \
+    --export-csv --export-vtk --checkpoint --rescale-to 70 --name f22
+```
+
+| output | units | why |
+|---|---|---|
+| `f22_SI.csv`, `f22_SI.vtk` | m, m/s, Pa, 1/s, s | what the flags asked for |
+| `f22.npz` | solver units | a checkpoint restarts the solver, and the solver restarts in its own units |
+
+Three things keep the two apart. The rescaled files carry an `_SI` suffix; the
+CSV header names every unit (`pressure_Pa`, `u_m_s`) because a spreadsheet is
+opened without the sidecar in view; and each `.provenance.json` records a
+`units` block — including the exchange rate, so the conversion can be undone —
+whether or not anything was rescaled.
+
+`--rescale-to` takes the speed rather than reading it from `--wind-speed`,
+because the two answer different questions: one sets the Reynolds number the
+solver runs at, the other says what a solver velocity of 1 means on the way
+out. They are usually the same number, and passing both says so explicitly.
+Air density comes from `--altitude`.
+
 **Reading results back in SI.** `pycfd/units.py` is the bridge:
 
 ```python
@@ -550,6 +576,7 @@ any file to launch a run. `python -m pycfd.main --help` prints the same list.
 | `--name LABEL` | `<case>_Re<re>` | label for logs, figure titles **and the files written** |
 | `--export-vtk` | off | write the final field as legacy VTK (ParaView) |
 | `--export-csv` | off | write the final field as CSV |
+| `--rescale-to V` | off | write those two in SI, treating solver velocity 1 as `V` m/s; adds an `_SI` suffix. Checkpoints stay in solver units |
 | `--checkpoint` | off | save a restartable `.npz` |
 | `--resume PATH` | none | continue from a checkpoint (pass a larger `--t-end`) |
 | `--progress` | off | `tqdm` progress bar |

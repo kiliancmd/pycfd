@@ -153,6 +153,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="write the final field as a legacy VTK file")
     io.add_argument("--export-csv", action="store_true",
                     help="write the final field as CSV")
+    io.add_argument("--rescale-to", type=float, default=None, dest="rescale_to",
+                    metavar="V",
+                    help="write --export-vtk/--export-csv in SI instead of the "
+                         "solver's units, treating a solver velocity of 1 as V "
+                         "m/s and the geometry's length unit as the metre. Air "
+                         "density comes from --altitude. Checkpoints are always "
+                         "written in solver units, so a restart stays exact")
     io.add_argument("--checkpoint", action="store_true",
                     help="save a restartable .npz checkpoint at the end")
     io.add_argument("--resume", default=None, metavar="PATH",
@@ -204,6 +211,13 @@ def case_specific_kwargs(args: argparse.Namespace) -> dict:
     """
     requested = {p: getattr(args, p) for p in CASE_SPECIFIC_FLAGS
                  if getattr(args, p, None) is not None}
+    if requested.get("wind_speed") is None:
+        # --altitude describes the air, and two different things convert with
+        # it: the Reynolds number and the export rescaling. Only the first is a
+        # case's business, so without a wind speed it does not go to the case --
+        # otherwise "--rescale-to 70 --altitude 3000" would be rejected by a
+        # case that was never asked to derive a Reynolds number.
+        requested.pop("altitude", None)
     unsupported = [p for p in requested if not _case_accepts(args.case, p)]
     if unsupported:
         flags = ", ".join(CASE_SPECIFIC_FLAGS[p][0] for p in sorted(set(unsupported)))
@@ -244,16 +258,49 @@ def case_kwargs(args: argparse.Namespace) -> dict:
     return kwargs
 
 
+def export_scaling(args: argparse.Namespace):
+    """The :class:`~pycfd.units.Scaling` ``--rescale-to`` asks for, or ``None``.
+
+    ``--altitude`` supplies the air density, which is what turns the solver's
+    kinematic pressure into pascals; without it the exports are referred to
+    sea level.
+    """
+    if args.rescale_to is None:
+        if getattr(args, "altitude", None) is not None and args.wind_speed is None:
+            # --altitude is only ever an input to a conversion. Neither
+            # conversion was asked for, so it would silently do nothing.
+            raise ValueError(
+                "--altitude only picks the air properties for --wind-speed or "
+                "--rescale-to; pass one of those as well, or drop it"
+            )
+        return None
+    from .units import Scaling
+
+    return Scaling.at_altitude(args.rescale_to, length=1.0,
+                               altitude=args.altitude or 0.0)
+
+
 def write_outputs(sim, args: argparse.Namespace, tag: str) -> list[Path]:
-    """Honour ``--export-vtk``, ``--export-csv`` and ``--checkpoint``."""
+    """Honour ``--export-vtk``, ``--export-csv``, ``--rescale-to`` and ``--checkpoint``."""
     outdir = Path(args.outdir)
+    scaling = export_scaling(args)
     written: list[Path] = []
+    # A rescaled export is a different file from an unrescaled one, and the two
+    # must not answer to the same name: the checkpoint below stays in solver
+    # units, and all three outputs share one provenance sidecar per name. The
+    # suffix keeps them apart and makes a file that holds pascals say so before
+    # anyone opens it.
+    field_tag = tag if scaling is None else f"{tag}_SI"
     if args.export_vtk:
-        written.append(sim.export_vtk(outdir / f"{tag}.vtk"))
+        written.append(sim.export_vtk(outdir / f"{field_tag}.vtk", scaling=scaling))
     if args.export_csv:
-        written.append(sim.export_csv(outdir / f"{tag}.csv"))
+        written.append(sim.export_csv(outdir / f"{field_tag}.csv", scaling=scaling))
     if args.checkpoint:
+        # Never rescaled: a checkpoint restarts the solver, and the solver
+        # restarts in its own units.
         written.append(sim.save_checkpoint(outdir / f"{tag}.npz"))
+    if scaling is not None and (args.export_vtk or args.export_csv):
+        log.info("exports rescaled to SI -- %s", scaling.summary().replace("\n", "  "))
     return written
 
 
@@ -374,6 +421,9 @@ def _run(args: argparse.Namespace) -> int:
         for name, description in available_cases().items():
             print(f"  {name:<14s} {description}")
         return EXIT_OK
+
+    # Validate the export scaling before a long run rather than after it.
+    export_scaling(args)
 
     if not args.live:
         # Static figures must not need a display.

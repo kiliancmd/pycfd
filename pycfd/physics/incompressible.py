@@ -189,15 +189,21 @@ class Simulation:
         return export_mod.save_checkpoint(self.fields, self.config, path,
                                           provenance=self.provenance())
 
-    def export_vtk(self, path: str | Path) -> Path:
-        """Write the current field as a legacy VTK file."""
-        return export_mod.export_vtk(self.fields, path, self.config.name,
-                                     provenance=self.provenance())
+    def export_vtk(self, path: str | Path, scaling=None) -> Path:
+        """Write the current field as a legacy VTK file.
 
-    def export_csv(self, path: str | Path) -> Path:
-        """Write the current field as CSV."""
+        ``scaling`` is a :class:`~pycfd.units.Scaling`; passing one writes the
+        file in SI instead of solver units.
+        """
+        return export_mod.export_vtk(self.fields, path, self.config.name,
+                                     provenance=self.provenance(),
+                                     scaling=scaling)
+
+    def export_csv(self, path: str | Path, scaling=None) -> Path:
+        """Write the current field as CSV, in SI when given a ``scaling``."""
         return export_mod.export_csv(self.fields, path,
-                                     provenance=self.provenance())
+                                     provenance=self.provenance(),
+                                     scaling=scaling)
 
     def __repr__(self) -> str:
         return (

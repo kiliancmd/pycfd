@@ -374,6 +374,67 @@ def test_cli_refuses_flight_conditions_on_a_case_without_a_body(tmp_path, capsys
     assert "Reynolds number against" in err and "cylinder" in err
 
 
+def test_rescale_to_builds_a_scaling_from_the_altitude():
+    from pycfd.main import export_scaling
+    from pycfd.units import atmosphere
+
+    args = build_parser().parse_args(["--rescale-to", "70", "--altitude", "3000"])
+    scaling = export_scaling(args)
+    assert scaling.speed == 70.0
+    assert scaling.density == pytest.approx(atmosphere(3000.0).density)
+
+
+def test_rescale_to_defaults_to_sea_level():
+    from pycfd.main import export_scaling
+    from pycfd.units import atmosphere
+
+    args = build_parser().parse_args(["--rescale-to", "70"])
+    assert export_scaling(args).density == pytest.approx(atmosphere(0.0).density)
+
+
+def test_no_rescaling_asked_for_means_no_scaling():
+    from pycfd.main import export_scaling
+
+    assert export_scaling(build_parser().parse_args([])) is None
+
+
+def test_altitude_reaches_the_rescaling_on_a_case_with_no_body(tmp_path):
+    """--altitude describes the air, so it must not need a Reynolds number.
+
+    It is refused by a case that has no body to size one against, which is why
+    it is withheld from the case unless a wind speed came with it.
+    """
+    from pycfd.main import case_specific_kwargs
+
+    args = build_parser().parse_args(
+        ["--case", "cavity", "--rescale-to", "70", "--altitude", "3000"]
+    )
+    assert "altitude" not in case_specific_kwargs(args)
+
+    code = main(["--case", "cavity", "--nx", "16", "--ny", "16", "--t-end", "0.02",
+                 "--no-plots", "-q", "--outdir", str(tmp_path),
+                 "--rescale-to", "70", "--altitude", "3000", "--export-csv"])
+    # Two solver steps miss the Ghia tolerance; the export is what is under test.
+    assert code in (EXIT_OK, EXIT_VALIDATION_FAILED)
+    header = (tmp_path / "cavity_Re100_SI.csv").read_text().splitlines()[0]
+    assert header.startswith("x_m,y_m,u_m_s")
+
+
+def test_an_altitude_that_converts_nothing_is_refused(tmp_path, capsys):
+    code = main(["--case", "cavity", "--nx", "16", "--ny", "16", "--t-end", "0.02",
+                 "--no-plots", "-q", "--outdir", str(tmp_path), "--altitude", "3000"])
+    assert code == EXIT_ERROR
+    assert "--rescale-to" in capsys.readouterr().err
+
+
+def test_rescaling_is_refused_before_the_run_not_after(tmp_path, capsys):
+    """A long run must not finish only to discover its export was invalid."""
+    code = main(["--case", "cavity", "--nx", "16", "--ny", "16", "--t-end", "1e9",
+                 "--no-plots", "-q", "--outdir", str(tmp_path), "--altitude", "3000"])
+    assert code == EXIT_ERROR
+    assert not list(tmp_path.glob("*"))
+
+
 @pytest.mark.parametrize("case", ["cavity", "channel", "taylor_green"])
 def test_flow_condition_flags_are_refused_where_they_do_not_apply(case):
     import inspect

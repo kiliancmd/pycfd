@@ -321,6 +321,14 @@ class Scaling:
         """Solver (kinematic, ``V^2``-scaled) pressure -> Pa."""
         return p * self.pressure_scale
 
+    def to_vorticity(self, w: float) -> float:
+        """Solver vorticity -> 1/s.
+
+        Vorticity is a velocity gradient, so it carries the reciprocal of the
+        time scale rather than either primary scale on its own.
+        """
+        return w / self.time_scale
+
     # -- physical -> solver --------------------------------------------- #
     def from_speed(self, u: float) -> float:
         """m/s -> solver velocity."""
@@ -337,6 +345,10 @@ class Scaling:
     def from_pascals(self, p: float) -> float:
         """Pa -> solver pressure."""
         return p / self.pressure_scale
+
+    def from_vorticity(self, w: float) -> float:
+        """1/s -> solver vorticity."""
+        return w * self.time_scale
 
     # ------------------------------------------------------------------ #
     def summary(self) -> str:
