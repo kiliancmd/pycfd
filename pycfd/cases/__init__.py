@@ -254,6 +254,19 @@ class GridStudy:
         changes = self.changes(metric)
         return bool(changes) and math.isfinite(changes[-1]) and changes[-1] <= tol
 
+    def richardson(self, metric: str):
+        """Richardson/GCI estimate for ``metric``, or ``None`` under three grids.
+
+        Two grids say whether a number moved; three say whether it is *going*
+        anywhere, and that is a different question -- see
+        :mod:`pycfd.analysis.richardson`.
+        """
+        if len(self.resolutions) < 3:
+            return None
+        from ..analysis.richardson import richardson
+
+        return richardson(self.resolutions, self.values[metric])
+
     @property
     def passed(self) -> bool:
         """True when every tracked metric has settled."""
@@ -272,20 +285,43 @@ class GridStudy:
                 lines.append(f"    {n:6d} {value:14.6g} {change:>10}")
             order = self.observed_order(metric)
             if math.isfinite(order):
-                lines.append(f"    observed order (finest pair): {order:.3f}")
+                # Named for how it was obtained, because the Richardson block
+                # below reports an order too and the two are different
+                # estimates: this one is the ratio of the error magnitudes
+                # themselves, which assumes the error is a clean C*h^p. Where
+                # they disagree, that assumption is what is failing.
+                lines.append(f"    order from the error magnitudes: {order:.3f}")
             verdict = "settled" if self.settled(metric) else "STILL MOVING"
             lines.append(f"    {verdict} at {SETTLED_TOLERANCE * 100:g}% "
                          f"between the two finest grids")
+            estimate = self.richardson(metric)
+            if estimate is not None:
+                lines.append(estimate.report())
         return "\n".join(lines)
+
+    def extrapolated(self) -> dict[str, float]:
+        """The zero-cell-size limit of each metric the study could extrapolate."""
+        out = {}
+        for metric in self.values:
+            estimate = self.richardson(metric)
+            if estimate is not None and estimate.trustworthy:
+                out[metric] = estimate.extrapolated
+        return out
 
     def report(self) -> str:
         """Formatted summary for the console."""
         head = (f"=== {self.case} grid study "
                 f"({', '.join(str(n) for n in self.resolutions)}) ===")
-        tail = ("  every tracked metric has settled" if self.passed else
-                "  at least one metric is still moving: refine further before "
-                "trusting it")
-        return "\n".join([head, self.table(), tail])
+        lines = [head, self.table()]
+        if len(self.resolutions) < 3:
+            lines.append("  two grids show whether a number moved; a third "
+                         "would show whether it is going anywhere")
+        lines.append(
+            "  every tracked metric has settled" if self.passed else
+            "  at least one metric is still moving: refine further before "
+            "trusting it"
+        )
+        return "\n".join(lines)
 
 
 def grid_study(case: str, resolutions=DEFAULT_RESOLUTIONS,

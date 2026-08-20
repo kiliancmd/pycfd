@@ -11,7 +11,7 @@ solver represents.
 python -m pytest pycfd/tests -q
 ```
 
-364 tests covering mesh geometry, obstacle construction from every supported
+396 tests covering mesh geometry, obstacle construction from every supported
 source, all six boundary condition types, Poisson assembly and all four linear
 solvers, discrete conservation, the analytical benchmarks, dimensional
 bookkeeping, CLI plumbing, output provenance, and the export round-trips — plus
@@ -34,7 +34,12 @@ Notable invariants under test:
   divergence-free exactly as a built-in one does;
 - the standard atmosphere reproduces the *published* ISA table rather than its
   own output, so a rearranged formula fails instead of being re-recorded, and a
-  configuration whose `u_ref` disagrees with its own inlet is refused.
+  configuration whose `u_ref` disagrees with its own inlet is refused;
+- Richardson extrapolation recovers a *constructed* answer exactly — build
+  `f(h) = f_exact + C h^p`, hand it three grids, and require `p` and `f_exact`
+  back — on uneven grid ladders as well as doubling ones, since only an uneven
+  ladder can catch a swapped refinement ratio; and a diverging triplet is
+  refused rather than extrapolated.
 
 ---
 
@@ -177,6 +182,9 @@ pycfd/
 ├── analysis/
 │   ├── postprocess.py   Vorticity, stream function, forces, probes
 │   ├── validation.py    Analytical solutions, Ghia data, error norms
+│   ├── richardson.py    Richardson extrapolation + GCI, and the regime check
+│   │                    that decides whether either is worth reporting
+│   ├── provenance.py    What produced a given output file
 │   └── export.py        VTK / CSV / NPZ checkpoints
 ├── visualization/
 │   ├── static_plot.py   Publication figures at 300 DPI
@@ -184,7 +192,8 @@ pycfd/
 ├── cases/               cavity, channel, cylinder, taylor_green; plus the
 │                        grid-study driver they share
 ├── tests/               mesh, geometry, boundary, pressure, solver, validation,
-│                        units, gridstudy, cli, provenance, regression
+│                        units, gridstudy, richardson, cli, provenance,
+│                        regression
 │                        + baselines.json
 ├── config.py            Dataclass configuration; every constant lives here
 ├── units.py             ISA atmosphere and the solver-unit <-> SI bridge

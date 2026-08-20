@@ -637,6 +637,53 @@ A quantity that is *structurally* zero — the lift on a symmetric steady wake �
 is not read as a grid refusing to converge; two different roundings of zero
 differ by tens of per cent and mean nothing.
 
+**With three or more grids** the study also reports a Richardson extrapolation
+and a Grid Convergence Index, in the form standardised by ASME V&V 20:
+
+```
+    grids 64 -> 128 -> 256   R = +0.2509  (monotonic)
+    order from successive differences 1.995   extrapolated 1.34124   finest is 0.33% from it
+    GCI 0.41%  ->  1.34013 .. 1.35127
+```
+
+Two grids say whether a number moved; a third says whether it is *going*
+anywhere. The order comes first:
+
+| `R` | meaning | what happens |
+|---|---|---|
+| `0 < R < 1` | monotonic convergence | extrapolated |
+| `-1 < R < 0` | oscillatory convergence | extrapolated, with a caveat |
+| `\|R\| ≥ 1` | divergence | **refused** — no number is printed |
+
+That refusal is the point of the whole thing. Richardson extrapolation assumes
+the sequence is already in its asymptotic regime, and handed one that is not it
+returns a number anyway — a diverging triplet and a beautifully converging one
+both produce a float. An observed order outside `[0.5, 4]` is likewise not
+believed: a second-order scheme apparently converging at order 7 is reporting
+the ratio of two differences made mostly of noise.
+
+The **GCI** is the band the converged answer is expected to lie in, at roughly
+95% confidence. It is what turns "Cd = 1.346 on the finest grid I could afford"
+into "Cd = 1.341, ± 0.4%" — and it is usually more sobering than expected: on
+grids too coarse for the body, bands of tens of per cent are normal and
+correct. The sample above is a clean second-order sequence; the cavity on
+16–32 cells reports a GCI near 70%, which is the honest answer for grids that
+far from resolved.
+
+Grids do not have to double — an uneven ladder is solved by the ASME
+fixed-point iteration for the order. `pycfd.analysis.richardson.richardson()`
+takes any three values directly, if you want the estimate without rerunning
+anything:
+
+```python
+from pycfd.analysis.richardson import richardson
+
+estimate = richardson([64, 128, 256], [1.412, 1.359, 1.3457])
+print(estimate.report())
+if estimate.trustworthy:
+    print(estimate.extrapolated, estimate.band())
+```
+
 #### Worked recipes
 
 Custom body from a vertex file, in a larger domain, with the wake anchored:

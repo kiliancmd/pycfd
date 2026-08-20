@@ -120,7 +120,7 @@ against a published −0.1034.
 | incompressibility | `max \|div u\|` at machine precision (~1e-14) |
 | cavity vs Ghia et al. | L2 ≤ 0.015 at Re = 100 / 400 / 1000 |
 | Poiseuille (periodic) | centreline exact to **1.0e-07 %** |
-| test suite | 364 tests, plus 6 full-fidelity benchmark regressions |
+| test suite | 396 tests, plus 6 full-fidelity benchmark regressions |
 
 Every number above is pinned by a test rather than by prose — see
 [regression baselines](docs/development.md#regression-baselines).
