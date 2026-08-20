@@ -1,0 +1,210 @@
+# Development
+
+Testing, continuous integration, project layout, and the limits of what this
+solver represents.
+
+---
+
+## Testing
+
+```bash
+python -m pytest pycfd/tests -q
+```
+
+248 tests covering mesh geometry, obstacle construction from every supported
+source, all six boundary condition types, Poisson assembly and all four linear
+solvers, discrete conservation, the analytical benchmarks, CLI plumbing, output
+provenance, and the export round-trips — plus 6 full-fidelity benchmark
+regressions behind `--runslow`.
+
+Notable invariants under test:
+
+- projected velocity is divergence-free to `1e-11` for six boundary
+  configurations, with and without an obstacle;
+- every boundary condition imposes **exactly** the prescribed value, checked on
+  the specific staggered quantity it controls;
+- uniform periodic flow and a quiescent box are preserved to machine precision;
+- Taylor–Green kinetic energy decays at the analytical `exp(−4νt)` rate;
+- the Poisson operator is exactly symmetric with vanishing row sums, and the
+  obstacle mask decouples solid cells;
+- the analytical reference solutions are verified against the governing
+  equations themselves, not taken on trust;
+- obstacle areas and centroids match closed-form values for circles, polygons,
+  concave outlines and bitmaps, and a custom body keeps the solver
+  divergence-free exactly as a built-in one does.
+
+---
+
+## Regression baselines
+
+The benchmark tests assert *tolerances* — convergence order above 1.8, cavity
+profiles within 0.02 of Ghia. Those catch a break but not a drift: a change that
+quietly moved second-order convergence from 1.9997 to 1.85 would pass every one
+of them.
+
+`pycfd/tests/baselines.json` therefore records the measured values themselves,
+and `tests/test_regression.py` pins them. The file is self-describing — it
+records the version, platform, Python and commit that produced each number.
+
+Two tiers, because fidelity costs time:
+
+| tier | resolution | runtime | when it runs |
+|---|---|---|---|
+| **fast** | reduced | ~10 s | every push, part of the default suite |
+| **full** | as published in [Validation](validation.md) | ~9 min | `--runslow`, and on `main` in CI |
+
+```bash
+python -m pytest pycfd/tests -q                 # fast tier included
+python -m pytest pycfd/tests --runslow -q       # plus full-fidelity benchmarks
+```
+
+The solver is deterministic — repeated runs are bit-identical on one machine —
+so the tolerance exists only to absorb float variation between platforms and
+BLAS builds. Quantities that are *structurally* zero (a divergence the
+projection drives out, the lift on a symmetric steady wake) are checked against
+an absolute bound instead, since comparing them relatively is meaningless.
+
+**A failure here is not automatically a bug.** It means a number moved, and
+someone has to decide whether that was a regression or an improvement.
+Re-recording is deliberately a separate command rather than a pytest flag — a
+baseline that refreshes itself records whatever the code currently does, which
+is the opposite of what a regression test is for:
+
+```bash
+python tools/record_baselines.py --fast     # ~10 s
+python tools/record_baselines.py --full     # ~9 min
+```
+
+Commit the regenerated file in the same change that caused the movement, so the
+diff shows the old and new numbers side by side.
+
+## Continuous integration
+
+`.github/workflows/tests.yml` runs on every push to `main`, every pull request,
+and on demand:
+
+- **suite** — the full test suite across Python 3.10, 3.11 and 3.12, with
+  `fail-fast: false` so one version failing does not hide the others. The
+  installed `numpy` / `scipy` / `matplotlib` / `numba` versions are printed
+  before the run, which makes a platform-specific baseline failure diagnosable
+  from the log alone.
+- **benchmarks** — the full-fidelity regressions, skipped on pull requests
+  because they cost several minutes of solver time.
+
+No install step is needed: `pycfd/conftest.py` puts the repository root on
+`sys.path`, so a fresh checkout runs directly.
+
+## Provenance in outputs
+
+A results directory accumulates figures, VTK dumps and checkpoints that look
+alike and are impossible to tell apart a week later. Every export therefore
+records the run that produced it — the exact command, the configuration, the
+version, and the commit — through two channels:
+
+| channel | formats | holds |
+|---|---|---|
+| embedded | PNG `tEXt` chunks, VTK title line, a field in the `.npz` | a digest, travelling inside the file |
+| `<name>.provenance.json` sidecar | all of them, including CSV | the full record with the complete config |
+
+CSV is deliberately left pure — a `#` banner would break readers that do not
+expect one — so for that format the sidecar is the only channel.
+
+```bash
+exiftool -Comment results/cavity/cavity_Re100_fields.png
+python -c "import json; print(json.load(open('results/run.provenance.json'))['command'])"
+```
+
+```python
+from pycfd.analysis.export import checkpoint_provenance
+record = checkpoint_provenance("results/run.npz")
+print(record["git_commit"], record["extra"]["cd"])
+```
+
+The record also carries the run's own diagnostics, so an exported file says not
+just how the run was configured but what it had converged to. A `+` on the
+commit hash means the working tree had uncommitted changes — a hash alone would
+imply a reproducibility it does not have.
+
+## Architecture
+
+```
+pycfd/
+├── core/
+│   ├── mesh.py          Structured mesh; the MAC index convention lives here
+│   ├── fields.py        (u, v, p) container with ghost layers
+│   ├── boundary.py      BC classes, periodic wrapping, global mass balance
+│   ├── pressure.py      Poisson assembly + direct/CG/SOR/Jacobi solvers
+│   ├── solver.py        Projection method: advection, diffusion, projection
+│   ├── kernels.py       Optional fused Numba stencils
+│   └── timestepper.py   Adaptive dt, run loop, divergence detection
+├── physics/
+│   ├── incompressible.py  High-level Simulation driver
+│   └── turbulence.py      Smagorinsky SGS model
+├── geometry/obstacles.py  Volume-fraction masks: primitives, polygons,
+│                          bitmaps, predicates
+├── analysis/
+│   ├── postprocess.py   Vorticity, stream function, forces, probes
+│   ├── validation.py    Analytical solutions, Ghia data, error norms
+│   └── export.py        VTK / CSV / NPZ checkpoints
+├── visualization/
+│   ├── static_plot.py   Publication figures at 300 DPI
+│   └── live_plot.py     FuncAnimation viewer
+├── cases/               cavity, channel, cylinder, taylor_green
+├── tests/               mesh, geometry, boundary, pressure, solver, validation,
+│                        cli, provenance, regression + baselines.json
+├── config.py            Dataclass configuration; every constant lives here
+└── main.py              CLI
+```
+
+Two directories sit outside the package. `pycfd/docs/` holds this guide and its
+siblings, alongside the README they belong to. The repository root — one level
+above `pycfd/` — holds `.github/workflows/tests.yml`, which GitHub requires
+there, and `tools/record_baselines.py`.
+
+Two structural notes against the original specification: `core/fields.py` was
+added so that `boundary.py` can operate on a field bundle without importing the
+solver (which would be circular), and `core/kernels.py` holds the optional JIT
+stencils. `visualization/` and `analysis/` never import from `core/`, and
+`core/` never imports Matplotlib.
+
+---
+
+## Known limitations
+
+- **`solver_type="simple"` is not implemented.** The configuration enum accepts
+  it because the specification lists it, but constructing a solver with it
+  raises `NotImplementedError`. Every build phase and success criterion in the
+  specification targets the projection method; SIMPLE was left as a clearly
+  flagged gap rather than a half-built alternative.
+- **Stretched meshes are generated but not solved on.** `StructuredMesh`
+  supports geometric stretching and is tested for it, but the finite-difference
+  operators are derived for uniform spacing, so the solver raises
+  `NonUniformMeshError` rather than quietly producing a first-order answer.
+- **The stream function is integrated, not solved for.** The specification asks
+  for `∇²ψ = −ω`; since the discrete divergence vanishes to machine precision,
+  direct integration of `u = ∂ψ/∂y` is path-independent, exact, cheaper, and
+  reproduces prescribed boundary values exactly. It is strictly the better
+  choice here.
+- **Immersed-boundary drag is first-order accurate** — see the cylinder section.
+- **No 3D or CAD import.** Geometry is a 2D outline, bitmap or predicate;
+  there is no STL, STEP or DXF reader, and none is planned — a 2D silhouette is
+  the entire model this solver can use.
+- **Immersed geometry is resolved by a staircase.** A body must span at least
+  ~16 cells for forces to be meaningful; thin bodies in large domains are
+  expensive on a uniform grid, which the usage guide's example illustrates
+  rather than hides.
+- **2D only**, uniform Cartesian grids, explicit time integration.
+
+## References
+
+- Harlow & Welch (1965), *Numerical calculation of time-dependent viscous
+  incompressible flow of fluid with free surface*, Phys. Fluids 8, 2182.
+- Chorin (1968), *Numerical solution of the Navier–Stokes equations*,
+  Math. Comp. 22, 745.
+- Ghia, Ghia & Shin (1982), *High-Re solutions for incompressible flow using the
+  Navier–Stokes equations and a multigrid method*, J. Comput. Phys. 48, 387.
+- Griebel, Dornseifer & Neunhoeffer (1998), *Numerical Simulation in Fluid
+
+---
+
+[← Back to the README](../README.md)

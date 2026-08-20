@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Simulation output. Every run writes figures, VTK/CSV dumps, checkpoints and a
+# provenance sidecar per export -- generated artefacts, not source.
+results/
