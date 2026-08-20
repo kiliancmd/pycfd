@@ -115,14 +115,16 @@ class Simulation:
         The force is the momentum the direct forcing had to remove to hold the
         body at rest, which is the discrete equivalent of integrating pressure
         and shear over the surface.  It is normalised with ``config.u_ref`` and
-        the obstacle's characteristic length.
+        ``config.l_ref`` -- the same two scales that define the Reynolds number,
+        so the coefficient and the Reynolds number always refer to the same
+        length.  A case that puts a body in the flow sets ``l_ref`` from that
+        body (or from whatever convention the caller named instead).
         """
         if self.obstacle is None:
             return 0.0, 0.0
         from ..analysis.postprocess import force_coefficients
         return force_coefficients(
-            self.solver.body_force_reaction, self.config.u_ref,
-            self.obstacle.characteristic_length,
+            self.solver.body_force_reaction, self.config.u_ref, self.config.l_ref,
         )
 
     def outlet_pressure_deviation(self) -> float:

@@ -12,7 +12,13 @@ import pytest
 
 from pycfd.cases import OUTLET_KINDS, available_cases, load_case, override_outlet
 from pycfd.config import BCKind, BCSpec
-from pycfd.main import EXIT_ERROR, EXIT_OK, build_parser, main
+from pycfd.main import (
+    EXIT_ERROR,
+    EXIT_OK,
+    EXIT_VALIDATION_FAILED,
+    build_parser,
+    main,
+)
 
 
 def external_walls(p_ref: float = 0.0) -> dict[str, BCSpec]:
@@ -230,6 +236,150 @@ def test_domain_flags_reposition_the_body_consistently():
     assert sim.mesh.lx == 24.0 and sim.mesh.ly == 12.0
     assert sim.obstacle.mask.shape == (96, 48)
     assert sim.obstacle.mask.any()
+
+
+# --------------------------------------------------------------------------- #
+# Reference length and flight conditions
+# --------------------------------------------------------------------------- #
+def test_parser_accepts_the_flow_condition_flags():
+    args = build_parser().parse_args(
+        ["--case", "cylinder", "--l-ref", "2.6", "--wind-speed", "70",
+         "--altitude", "3000"]
+    )
+    assert args.l_ref == 2.6 and args.wind_speed == 70.0 and args.altitude == 3000.0
+
+
+def test_flow_condition_flags_default_to_the_bodys_own_convention():
+    args = build_parser().parse_args(["--case", "cylinder"])
+    assert args.l_ref is None and args.wind_speed is None and args.altitude is None
+
+
+def test_reference_length_defaults_to_the_bodys_span():
+    sim = load_case("cylinder").build(re=20, nx=48, ny=24)
+    assert sim.config.l_ref == pytest.approx(sim.obstacle.characteristic_length)
+
+
+def test_l_ref_overrides_the_reference_length_only():
+    """The body does not change size; only what its forces are divided by."""
+    sim = load_case("cylinder").build(re=20, nx=48, ny=24, l_ref=2.6)
+    assert sim.config.l_ref == 2.6
+    # Blockage and grid resolution still describe the real body.
+    assert sim.obstacle.characteristic_length == pytest.approx(1.0)
+
+
+def test_l_ref_reaches_the_force_coefficients():
+    """The coefficients divide by the reference length, not by the body's span.
+
+    Comparing two runs would not show this: ``l_ref`` also feeds
+    ``nu = u_ref l_ref / re``, so changing it changes the flow as well as the
+    normalisation.  The wiring is therefore checked against the definition on a
+    single run.
+    """
+    from pycfd.analysis.postprocess import force_coefficients
+
+    sim = load_case("cylinder").build(re=20, nx=48, ny=24, l_ref=2.6)
+    sim.run(t_end=0.4)
+    assert sim.obstacle.characteristic_length == pytest.approx(1.0)
+    assert sim.force_coefficients() == pytest.approx(
+        force_coefficients(sim.solver.body_force_reaction, 1.0, 2.6))
+
+
+def test_the_reference_length_defines_the_viscosity_too():
+    """``nu = u_ref l_ref / re``: Re and the coefficients share one length."""
+    sim = load_case("cylinder").build(re=20, nx=48, ny=24, l_ref=2.6)
+    assert sim.config.nu == pytest.approx(1.0 * 2.6 / 20.0)
+
+
+def test_l_ref_must_be_positive():
+    with pytest.raises(ValueError, match="l_ref must be positive"):
+        load_case("cylinder").build(re=20, nx=48, ny=24, l_ref=0.0)
+
+
+def test_wind_speed_derives_the_reynolds_number():
+    from pycfd.units import atmosphere, reynolds_number
+
+    sim = load_case("cylinder").build(nx=48, ny=24, wind_speed=70.0, l_ref=2.6)
+    expected = reynolds_number(70.0, 2.6, atmosphere(0.0).kinematic_viscosity)
+    assert sim.config.re == pytest.approx(expected)
+    # The solver itself stays non-dimensional: the speed went into Re, not u_ref.
+    assert sim.config.u_ref == 1.0
+
+
+def test_wind_speed_without_l_ref_uses_the_bodys_own_length():
+    from pycfd.units import atmosphere, reynolds_number
+
+    sim = load_case("cylinder").build(nx=48, ny=24, wind_speed=70.0)
+    expected = reynolds_number(70.0, sim.obstacle.characteristic_length,
+                               atmosphere(0.0).kinematic_viscosity)
+    assert sim.config.re == pytest.approx(expected)
+
+
+def test_wind_speed_puts_the_real_viscosity_into_the_solver():
+    """The whole chain in one identity.
+
+    ``nu_solver = u_ref l_ref / re`` and ``re = V l_ref / nu_air`` together give
+    ``nu_solver = nu_air / V``, independent of which length convention was
+    chosen.  If any link were formed with a different length the reference
+    length would fail to cancel and this would not hold.
+    """
+    from pycfd.units import atmosphere
+
+    nu_air = atmosphere(3000.0).kinematic_viscosity
+    for l_ref in (None, 2.6, 11.5):
+        sim = load_case("cylinder").build(nx=48, ny=24, wind_speed=70.0,
+                                          altitude=3000.0, l_ref=l_ref)
+        assert sim.config.nu == pytest.approx(nu_air / 70.0, rel=1e-12)
+
+
+def test_altitude_thins_the_air_and_lowers_the_reynolds_number():
+    low = load_case("cylinder").build(nx=48, ny=24, wind_speed=70.0)
+    high = load_case("cylinder").build(nx=48, ny=24, wind_speed=70.0, altitude=10000.0)
+    assert high.config.re < low.config.re
+
+
+def test_re_and_wind_speed_together_are_refused():
+    """Two answers to the same question is a mistake, not a preference."""
+    with pytest.raises(ValueError, match="both set the Reynolds number"):
+        load_case("cylinder").build(nx=48, ny=24, re=100.0, wind_speed=70.0)
+
+
+def test_altitude_without_a_wind_speed_is_refused():
+    with pytest.raises(ValueError, match="pass --wind-speed as well"):
+        load_case("cylinder").build(nx=48, ny=24, altitude=3000.0)
+
+
+def test_a_transonic_wind_speed_warns_that_the_equations_do_not_apply(caplog):
+    with caplog.at_level("WARNING"):
+        load_case("cylinder").build(nx=48, ny=24, wind_speed=272.0)
+    assert "incompressible limit" in caplog.text
+
+
+def test_cli_reports_the_flight_conditions_it_used(tmp_path, capsys):
+    code = main(["--case", "cylinder", "--nx", "48", "--ny", "24", "--t-end", "0.1",
+                 "--no-plots", "-q", "--outdir", str(tmp_path),
+                 "--wind-speed", "70", "--altitude", "3000", "--l-ref", "2.6"])
+    # A 0.1 s run is far too short for the shedding check to pass; what is under
+    # test here is the report, not the physics.
+    assert code in (EXIT_OK, EXIT_VALIDATION_FAILED)
+    out = capsys.readouterr().out
+    for key in ("wind_speed_m_s", "altitude_m", "mach", "reference_length"):
+        assert key in out
+
+
+def test_cli_refuses_flight_conditions_on_a_case_without_a_body(tmp_path, capsys):
+    code = main(["--case", "cavity", "--nx", "24", "--ny", "24", "--t-end", "0.02",
+                 "--no-plots", "-q", "--outdir", str(tmp_path), "--wind-speed", "70"])
+    assert code == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "Reynolds number against" in err and "cylinder" in err
+
+
+@pytest.mark.parametrize("case", ["cavity", "channel", "taylor_green"])
+def test_flow_condition_flags_are_refused_where_they_do_not_apply(case):
+    import inspect
+
+    params = inspect.signature(load_case(case).build).parameters
+    assert not {"l_ref", "wind_speed", "altitude"} & set(params)
 
 
 @pytest.mark.parametrize("case", ["cavity", "channel", "taylor_green"])

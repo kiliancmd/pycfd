@@ -37,12 +37,16 @@ from ..analysis.postprocess import Probe, force_coefficients, strouhal_number
 from ..config import BCKind, BCSpec, SimulationConfig
 from ..geometry.obstacles import circle_mask
 from ..physics.incompressible import Simulation
+from ..units import INCOMPRESSIBLE_MACH_LIMIT, Scaling
 
 log = logging.getLogger(__name__)
 
 #: Free-stream speed and cylinder diameter: the reference scales for Re, Cd and St.
 U_INF = 1.0
 DIAMETER = 1.0
+
+#: Reynolds number used when neither ``re`` nor flight conditions are given.
+DEFAULT_RE = 100.0
 
 #: Domain in diameters: enough upstream to feel uniform, enough downstream for a wake.
 DOMAIN_LENGTH = 16.0
@@ -65,12 +69,65 @@ REFERENCE_ST = {100: (0.160, 0.172)}
 TRANSIENT_FRACTION = 0.5
 
 
-def build(re: float = 100.0, nx: int = 256, ny: int = 128,
+def flight_scaling(wind_speed: float, altitude: float | None = None) -> Scaling:
+    """The solver-to-SI exchange rate implied by a speed and an altitude.
+
+    The geometry's length unit is taken to be the metre -- a body loaded from a
+    file carries its own dimensions, and there is nothing else those numbers
+    could sensibly mean once a real wind speed is attached to them.
+    """
+    return Scaling.at_altitude(wind_speed, length=1.0,
+                               altitude=0.0 if altitude is None else altitude)
+
+
+def _resolve_reynolds(re: float | None, wind_speed: float | None,
+                      altitude: float | None, reference_length: float) -> float:
+    """Reynolds number from either a direct value or real flight conditions.
+
+    The two routes are mutually exclusive on purpose: a run that was handed both
+    a Reynolds number and a wind speed has been given two different answers to
+    the same question, and picking one silently is how a sweep ends up plotted
+    against the wrong axis.
+    """
+    if wind_speed is None:
+        if altitude is not None:
+            raise ValueError(
+                "altitude only selects the air properties that turn a wind speed "
+                "into a Reynolds number; pass --wind-speed as well, or drop it"
+            )
+        return DEFAULT_RE if re is None else float(re)
+
+    if re is not None:
+        raise ValueError(
+            f"re={re:g} and wind_speed={wind_speed:g} m/s both set the Reynolds "
+            "number; pass one or the other. --wind-speed derives it from the "
+            "reference length and the ISA viscosity at --altitude"
+        )
+
+    scaling = flight_scaling(wind_speed, altitude)
+    re = scaling.reynolds(reference_length)
+    log.info(
+        "%g m/s at %g m altitude, L_ref = %g m, nu = %.4g m^2/s -> Re = %.4g",
+        wind_speed, altitude or 0.0, reference_length,
+        scaling.kinematic_viscosity, re,
+    )
+    if scaling.compressible:
+        log.warning(
+            "M = %.2f is above the incompressible limit of %g: this solver has no "
+            "density equation at all, so the result approximates a different flow "
+            "rather than the same one slightly less well",
+            scaling.mach, INCOMPRESSIBLE_MACH_LIMIT,
+        )
+    return re
+
+
+def build(re: float | None = None, nx: int = 256, ny: int = 128,
           t_end: float | None = None, dt: float = 0.02, cfl_max: float = 0.4,
           domain_length: float = DOMAIN_LENGTH, domain_height: float = DOMAIN_HEIGHT,
           cylinder_x: float = CYLINDER_X, obstacle=None,
           outlet_type: str | None = None, p_ref: float | None = None,
-          **overrides) -> Simulation:
+          l_ref: float | None = None, wind_speed: float | None = None,
+          altitude: float | None = None, **overrides) -> Simulation:
     """Construct the cylinder simulation without running it.
 
     ``domain_height`` controls the blockage ratio ``D / H``, which has a strong
@@ -85,14 +142,61 @@ def build(re: float = 100.0, nx: int = 256, ny: int = 128,
     ``outlet_type`` and ``p_ref`` retype the downstream boundary; leaving them
     ``None`` keeps this case's own choice of a pressure outlet at
     :data:`OUTLET_PRESSURE`.
+
+    Reference length and speed
+    --------------------------
+    ``l_ref`` overrides the length the Reynolds number and the force
+    coefficients are formed with.  A body loaded from a file defaults to its
+    extent across the flow, which is the cylinder-diameter convention; an
+    aircraft is conventionally reported against its overall *length* instead,
+    and only the caller knows which one is meant.  The body's geometric span is
+    still what the blockage ratio and the cells-across-the-body warning use, so
+    overriding this changes what the numbers are normalised by and nothing else.
+
+    ``wind_speed`` (m/s) and ``altitude`` (m) derive the Reynolds number from
+    real conditions instead: ``Re = V L / nu`` with ``nu`` taken from the ISA,
+    treating the geometry's length unit as the metre.  The solver itself stays
+    non-dimensional -- ``u_ref`` remains 1 -- so use :func:`flight_scaling` to
+    put the results back into m/s, Pa and seconds.
     """
     from . import override_outlet
+    from ..core.mesh import StructuredMesh
+
     # A benchmark has to pin the physics it validates.  ``use_les`` is a package
     # default that legitimately changes with whatever case is being worked on,
     # and an eddy-viscosity model silently switched on turns an exact laminar
     # solution into something else -- it cost this benchmark its second-order
     # convergence once already.  ``setdefault`` keeps ``--les`` working.
     overrides.setdefault("use_les", False)
+
+    # The mesh is built before the configuration because the body has to exist
+    # before its size is known, and its size is what --l-ref overrides and
+    # --wind-speed turns into a Reynolds number.
+    mesh = StructuredMesh(nx, ny, domain_length, domain_height)
+    cy = domain_height / 2.0
+    if obstacle is None:
+        obstacle = circle_mask(mesh, (cylinder_x, cy), DIAMETER / 2.0, name="cylinder")
+    elif obstacle.mask.shape != mesh.shape:
+        raise ValueError(
+            f"the supplied obstacle was built on a {obstacle.mask.shape} grid but "
+            f"the simulation mesh is {mesh.shape}; build both from the same mesh"
+        )
+
+    # Reynolds number and force coefficients follow the body's own length scale
+    # unless the caller names a different convention.
+    if l_ref is not None and l_ref <= 0:
+        raise ValueError(f"l_ref must be positive, got {l_ref}")
+    reference_length = (obstacle.characteristic_length if l_ref is None
+                        else float(l_ref))
+    re = _resolve_reynolds(re, wind_speed, altitude, reference_length)
+
+    span = obstacle.characteristic_length
+    if mesh.dy > span / 8.0:
+        log.warning(
+            "only %.1f cells span the body; forces will be crude "
+            "(16 or more is recommended)", span / mesh.dy,
+        )
+
     overrides.setdefault("name", f"cylinder_Re{re:g}")
 
     # Steady wakes settle quickly; shedding needs many periods to become periodic.
@@ -100,7 +204,7 @@ def build(re: float = 100.0, nx: int = 256, ny: int = 128,
 
     cfg = SimulationConfig(
         nx=nx, ny=ny, lx=domain_length, ly=domain_height,
-        re=re, u_ref=U_INF, l_ref=DIAMETER,
+        re=re, u_ref=U_INF, l_ref=reference_length,
         dt=dt, t_end=default_t_end if t_end is None else t_end,
         cfl_max=cfl_max,
         boundary_config=override_outlet({
@@ -117,26 +221,6 @@ def build(re: float = 100.0, nx: int = 256, ny: int = 128,
         **overrides,
     )
 
-    from ..core.mesh import StructuredMesh
-
-    mesh = StructuredMesh.from_config(cfg)
-    cy = domain_height / 2.0
-    if obstacle is None:
-        obstacle = circle_mask(mesh, (cylinder_x, cy), DIAMETER / 2.0, name="cylinder")
-    elif obstacle.mask.shape != mesh.shape:
-        raise ValueError(
-            f"the supplied obstacle was built on a {obstacle.mask.shape} grid but "
-            f"the simulation mesh is {mesh.shape}; build both from the same mesh"
-        )
-    # Reynolds number and force coefficients follow the body's own length scale.
-    cfg.l_ref = obstacle.characteristic_length
-    span = obstacle.characteristic_length
-    if mesh.dy > span / 8.0:
-        log.warning(
-            "only %.1f cells span the body; forces will be crude "
-            "(16 or more is recommended)", span / mesh.dy,
-        )
-
     # The perturbation is handed over as part of the initial condition rather
     # than added afterwards, so that Simulation's initial projection removes its
     # divergence.  Injecting it into an already-projected field leaves the
@@ -146,7 +230,7 @@ def build(re: float = 100.0, nx: int = 256, ny: int = 128,
     return Simulation(cfg, obstacle=obstacle, u_init=U_INF, v_init=v_init)
 
 
-def build_from_geometry(path, re: float = 100.0, nx: int = 256, ny: int = 128,
+def build_from_geometry(path, re: float | None = None, nx: int = 256, ny: int = 128,
                         scale: float = 1.0, rotate_deg: float = 0.0,
                         center: tuple[float, float] | None = None,
                         threshold: float = 0.5, invert: bool = False,
@@ -158,6 +242,10 @@ def build_from_geometry(path, re: float = 100.0, nx: int = 256, ny: int = 128,
     ``center`` -- one quarter of the way along the domain by default, leaving
     the rest for the wake.  Bitmaps are stretched across the whole domain, so
     they carry their own placement and ignore the transform arguments.
+
+    ``l_ref``, ``wind_speed`` and ``altitude`` pass through to :func:`build`;
+    they are the flags that matter most here, since a body from a file is
+    exactly the case where the default reference length is a guess.
     """
     from ..geometry.obstacles import (
         load_polygon,
@@ -201,27 +289,43 @@ def _wake_perturbation(mesh, cylinder_x: float, cy: float) -> np.ndarray:
     return PERTURBATION_AMPLITUDE * U_INF * blob
 
 
-def run(re: float = 100.0, nx: int = 256, ny: int = 128, t_end: float | None = None,
+def run(re: float | None = None, nx: int = 256, ny: int = 128,
+        t_end: float | None = None,
         dt: float = 0.02, outdir: str | Path = "results/cylinder",
         make_plots: bool = True, progress: bool = False, geometry=None,
         geometry_scale: float = 1.0, geometry_rotate: float = 0.0,
-        outlet_type: str | None = None, p_ref: float | None = None, **overrides):
+        outlet_type: str | None = None, p_ref: float | None = None,
+        l_ref: float | None = None, wind_speed: float | None = None,
+        altitude: float | None = None, **overrides):
     """Run the cylinder case, measure Cd/St and write the figures.
 
     Passing ``geometry`` (a path to a vertex file or bitmap) substitutes a
     custom 2D body for the circular cylinder.  The published cylinder reference
     values are then not applicable and are omitted from the report.
+
+    ``l_ref``, ``wind_speed`` and ``altitude`` are described in :func:`build`.
+    When flight conditions are given, the report also carries the dimensional
+    facts they imply -- speed, altitude, Mach number and the free-stream dynamic
+    pressure -- so the run records what it was actually a simulation *of*.
     """
     from . import CaseResult
 
+    scales = dict(l_ref=l_ref, wind_speed=wind_speed, altitude=altitude)
     if geometry is not None:
         sim = build_from_geometry(geometry, re=re, nx=nx, ny=ny,
                                   scale=geometry_scale, rotate_deg=geometry_rotate,
                                   t_end=t_end, dt=dt, outlet_type=outlet_type,
-                                  p_ref=p_ref, **overrides)
+                                  p_ref=p_ref, **scales, **overrides)
     else:
         sim = build(re=re, nx=nx, ny=ny, t_end=t_end, dt=dt,
-                    outlet_type=outlet_type, p_ref=p_ref, **overrides)
+                    outlet_type=outlet_type, p_ref=p_ref, **scales, **overrides)
+
+    # Everything normalised by a length uses the one the configuration settled
+    # on, which is the body's own span unless --l-ref named another convention.
+    # The Reynolds number likewise comes back from the configuration, since
+    # --wind-speed derives it rather than being handed it.
+    reference_length = sim.config.l_ref
+    re = sim.config.re
 
     # Record the force history and a wake probe so Cd and St can be extracted.
     history: dict[str, list[float]] = {"t": [], "cd": [], "cl": []}
@@ -229,7 +333,8 @@ def run(re: float = 100.0, nx: int = 256, ny: int = 128, t_end: float | None = N
     sim.probes.append(probe)
 
     def record(fields, info):
-        cd, cl = force_coefficients(sim.solver.body_force_reaction, U_INF, DIAMETER)
+        cd, cl = force_coefficients(sim.solver.body_force_reaction, U_INF,
+                                    reference_length)
         history["t"].append(fields.t)
         history["cd"].append(cd)
         history["cl"].append(cl)
@@ -247,16 +352,29 @@ def run(re: float = 100.0, nx: int = 256, ny: int = 128, t_end: float | None = N
         "cd_mean": float(cd[settled].mean()) if settled.any() else float("nan"),
         "cd_final": float(cd[-1]) if cd.size else float("nan"),
         "cl_rms": float(np.sqrt(np.mean(cl[settled] ** 2))) if settled.any() else float("nan"),
-        # Reported against the body actually in the flow, which is the cylinder
-        # diameter by default but the custom body's own length scale otherwise.
+        # The body's own extent across the flow: what the grid has to resolve
+        # and what blocks the channel, whatever the coefficients are divided by.
         "characteristic_length": sim.obstacle.characteristic_length,
         "cells_across_body": sim.obstacle.characteristic_length / sim.mesh.dy,
         "blockage_ratio": sim.obstacle.characteristic_length / sim.mesh.ly,
+        # The length Re, Cd and St were actually formed with -- the same number
+        # unless --l-ref asked for a different convention.
+        "reference_length": reference_length,
+        "reynolds": re,
         "steps": result.steps,
         "final_time": result.time,
         "wall_time_s": result.wall_time,
         "max_divergence": sim.solver.max_divergence(sim.fields),
     }
+
+    if wind_speed is not None:
+        # What the run is a simulation *of*, recorded next to what it measured.
+        scaling = flight_scaling(wind_speed, altitude)
+        metrics["wind_speed_m_s"] = float(wind_speed)
+        metrics["altitude_m"] = float(altitude or 0.0)
+        metrics["kinematic_viscosity"] = scaling.kinematic_viscosity
+        metrics["mach"] = scaling.mach
+        metrics["dynamic_pressure_pa"] = scaling.dynamic_pressure
 
     checks: list[tuple[str, bool, str]] = []
     key = int(round(re))
@@ -280,7 +398,7 @@ def run(re: float = 100.0, nx: int = 256, ny: int = 128, t_end: float | None = N
 
     if re >= 50 and geometry is None:
         series = probe.as_arrays()
-        st = strouhal_number(series["t"], series["v"], DIAMETER, U_INF)
+        st = strouhal_number(series["t"], series["v"], reference_length, U_INF)
         metrics["strouhal"] = st
         metrics["cl_peak_to_peak"] = (
             float(cl[settled].max() - cl[settled].min()) if settled.any() else float("nan")

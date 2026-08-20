@@ -11,11 +11,11 @@ solver represents.
 python -m pytest pycfd/tests -q
 ```
 
-248 tests covering mesh geometry, obstacle construction from every supported
+317 tests covering mesh geometry, obstacle construction from every supported
 source, all six boundary condition types, Poisson assembly and all four linear
-solvers, discrete conservation, the analytical benchmarks, CLI plumbing, output
-provenance, and the export round-trips — plus 6 full-fidelity benchmark
-regressions behind `--runslow`.
+solvers, discrete conservation, the analytical benchmarks, dimensional
+bookkeeping, CLI plumbing, output provenance, and the export round-trips — plus
+6 full-fidelity benchmark regressions behind `--runslow`.
 
 Notable invariants under test:
 
@@ -31,7 +31,10 @@ Notable invariants under test:
   equations themselves, not taken on trust;
 - obstacle areas and centroids match closed-form values for circles, polygons,
   concave outlines and bitmaps, and a custom body keeps the solver
-  divergence-free exactly as a built-in one does.
+  divergence-free exactly as a built-in one does;
+- the standard atmosphere reproduces the *published* ISA table rather than its
+  own output, so a rearranged formula fails instead of being re-recorded, and a
+  configuration whose `u_ref` disagrees with its own inlet is refused.
 
 ---
 
@@ -172,8 +175,9 @@ pycfd/
 │   └── live_plot.py     FuncAnimation viewer
 ├── cases/               cavity, channel, cylinder, taylor_green
 ├── tests/               mesh, geometry, boundary, pressure, solver, validation,
-│                        cli, provenance, regression + baselines.json
+│                        units, cli, provenance, regression + baselines.json
 ├── config.py            Dataclass configuration; every constant lives here
+├── units.py             ISA atmosphere and the solver-unit <-> SI bridge
 └── main.py              CLI
 ```
 

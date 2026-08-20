@@ -82,6 +82,23 @@ def build_parser() -> argparse.ArgumentParser:
                      help="pressure held on a pressure outlet (default 0.0). "
                           "Ignored, with a warning, by a velocity outlet")
 
+    flow = p.add_argument_group("flow conditions (external-flow / cylinder case)")
+    flow.add_argument("--l-ref", type=float, default=None, dest="l_ref", metavar="L",
+                      help="reference length for the Reynolds number and the force "
+                           "coefficients, in the geometry's own units. Default: the "
+                           "body's extent across the flow, i.e. the cylinder-diameter "
+                           "convention. Use it for the aircraft-length convention "
+                           "instead. Blockage and grid-resolution figures keep "
+                           "reporting the body's real span either way")
+    flow.add_argument("--wind-speed", type=float, default=None, dest="wind_speed",
+                      metavar="V",
+                      help="free-stream speed in m/s. Derives the Reynolds number "
+                           "from it and the ISA viscosity, treating the geometry's "
+                           "length unit as the metre; mutually exclusive with --re")
+    flow.add_argument("--altitude", type=float, default=None, metavar="Z",
+                      help="altitude in metres, selecting the ISA air properties "
+                           "--wind-speed uses (default: sea level)")
+
     geom = p.add_argument_group("custom geometry (external-flow / cylinder case)")
     geom.add_argument("--geometry", default=None, metavar="FILE",
                       help="2D body to place in the flow: a vertex file "
@@ -164,6 +181,9 @@ CASE_SPECIFIC_FLAGS = {
     "p_ref": ("--p-ref", "outflow boundary to retype"),
     "domain_length": ("--domain-length", "configurable domain size"),
     "domain_height": ("--domain-height", "configurable domain size"),
+    "l_ref": ("--l-ref", "body in the flow to measure a reference length on"),
+    "wind_speed": ("--wind-speed", "body in the flow to size a Reynolds number against"),
+    "altitude": ("--altitude", "body in the flow to size a Reynolds number against"),
 }
 
 

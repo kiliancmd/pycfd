@@ -167,7 +167,9 @@ integrates to the true area to a fraction of a percent.
 > `characteristic_length` is not cosmetic: it is the length that forms the
 > Reynolds number and normalises Cd and Cl. It defaults to the shape's height
 > (its extent across the flow), matching the cylinder-diameter convention. Set
-> it explicitly if you want coefficients based on chord instead.
+> it explicitly if you want coefficients based on chord instead — or pass
+> [`--l-ref`](#reference-length-and-flight-conditions) on the command line,
+> which does the same thing without touching the geometry file.
 
 There is **no 3D import and no STL/DXF reader** — this is a 2D solver, and a
 2D outline or silhouette is the whole model.
@@ -397,6 +399,78 @@ above for what the two conditions differ in. For anything the flags cannot
 express, build the `boundary_config` dict yourself as shown in step 3; the case
 files under `cases/` are worked examples of exactly that.
 
+#### Reference length and flight conditions
+
+Two questions come up the moment a real body goes into the flow: *which* length
+the Reynolds number is about, and what Reynolds number a real speed even
+corresponds to. Three flags answer them.
+
+**`--l-ref L` — which length the numbers are about.** A reference length is a
+convention, not a measurement. A cylinder uses its diameter, an aerofoil its
+chord, an aircraft its overall length — and the loader cannot tell which you
+mean, so it defaults to the body's extent *across* the flow, the
+cylinder-diameter convention. `--l-ref` names a different one, in the geometry
+file's own units:
+
+```bash
+python -m pycfd.main --case cylinder --geometry f22_side_profile.csv --l-ref 18.8 --re 1e6
+```
+
+It changes what `Re`, `Cd`, `Cl` and `St` are formed with — and therefore
+`nu = u_ref * l_ref / re`, since the Reynolds number and the coefficients must
+refer to the same length. It does **not** change the body. `blockage_ratio` and
+`cells_across_body` keep reporting the body's real span, because those are
+questions about the grid and the domain rather than about a convention. Both
+lengths appear in the report, as `reference_length` and `characteristic_length`.
+
+**`--wind-speed V` and `--altitude Z` — a Reynolds number from real
+conditions.** `Re = V·L/nu` with `nu` from the International Standard
+Atmosphere, treating the geometry's length unit as the metre:
+
+```bash
+python -m pycfd.main --case cylinder --geometry f22_side_profile.csv \
+    --l-ref 18.8 --wind-speed 70 --altitude 3000
+```
+
+`--re` and `--wind-speed` are mutually exclusive — two answers to one question
+is a mistake, not a preference — and `--altitude` on its own is refused, since
+it only selects the air properties the wind speed is converted with. Above
+Mach 0.3 the run logs a warning: an incompressible solver has no density
+equation at all, so past that point it is approximating a *different* flow, not
+the same one slightly less well.
+
+The solver stays non-dimensional throughout. `u_ref` remains 1.0, the free
+stream still enters at 1.0, and the real speed lives in the Reynolds number.
+The report carries the dimensional facts alongside — `wind_speed_m_s`,
+`altitude_m`, `kinematic_viscosity`, `mach`, `dynamic_pressure_pa` — so the run
+records what it was a simulation *of*.
+
+**Reading results back in SI.** `pycfd/units.py` is the bridge:
+
+```python
+from pycfd.units import Scaling
+
+s = Scaling.at_altitude(70.0, length=1.0, altitude=3000.0)
+print(s.summary())
+# 1 solver velocity = 70 m/s   1 solver length = 1 m   1 solver time = 0.01429 s
+# rho = 0.9091 kg/m^3   q_inf = 2227 Pa   M = 0.213
+
+s.to_speed(sim.fields.speed().max())   # solver velocity -> m/s
+s.to_pascals(sim.fields.p_phys.mean()) # solver pressure -> Pa
+s.to_seconds(sim.fields.t)             # solver time     -> s
+```
+
+It also exposes `atmosphere(z)` for the ISA properties on their own and
+`reynolds_number(V, L, nu)` for the arithmetic, so a Reynolds number can be
+worked out before there is a configuration to put it in.
+
+> **Do not raise `u_ref` to a flight speed.** `u_ref` is the velocity scale the
+> fields are *already* expressed in, and force coefficients are divided by its
+> square. Setting it to 70 while the inlet still drives the flow at 1.0 does not
+> rescale anything — it divides every coefficient by 4900 and reports a drag
+> coefficient near zero. `SimulationConfig.validate()` refuses that combination
+> outright. Put the speed in the Reynolds number and convert afterwards.
+
 #### Complete CLI reference
 
 Everything below is settable from the command line — you should not need to edit
@@ -423,6 +497,14 @@ any file to launch a run. `python -m pycfd.main --help` prints the same list.
 | `--mode MODE` | `periodic` | channel only: `periodic` or `developing` |
 | `--domain-length L` † | 16 (cylinder) | streamwise extent of the domain |
 | `--domain-height H` † | 8 (cylinder) | cross-stream extent; with the body size this sets the blockage ratio |
+
+**Flow conditions** †
+
+| flag | default | meaning |
+|---|---|---|
+| `--l-ref L` | the body's span across the flow | reference length for `Re`, `Cd`, `Cl` and `St`, in the geometry's units |
+| `--wind-speed V` | none | free-stream speed in m/s; derives `Re` from it and the ISA viscosity. Mutually exclusive with `--re` |
+| `--altitude Z` | `0` (sea level) | altitude in metres, selecting the ISA air properties `--wind-speed` uses |
 
 **Outflow boundary** †
 
@@ -473,12 +555,12 @@ any file to launch a run. `python -m pycfd.main --help` prints the same list.
 | `--progress` | off | `tqdm` progress bar |
 | `-v`/`--verbose`, `-q`/`--quiet` | INFO | DEBUG logging / warnings only |
 
-† **Case-specific.** `--domain-length`/`--domain-height`, the two outflow flags
-and the three geometry flags only apply to cases that have the corresponding
-feature — an external flow with an outlet and a configurable domain, which today
-means `cylinder` (and the outflow flags also on `channel --mode developing`).
-Using one where it cannot apply is an **error naming the cases that do support
-it**, not a silent no-op.
+† **Case-specific.** `--domain-length`/`--domain-height`, the three flow-condition
+flags, the two outflow flags and the three geometry flags only apply to cases
+that have the corresponding feature — an external flow with a body, an outlet
+and a configurable domain, which today means `cylinder` (and the outflow flags
+also on `channel --mode developing`). Using one where it cannot apply is an
+**error naming the cases that do support it**, not a silent no-op.
 
 Exit codes: `0` ran and validated, `1` ran but a validation check missed its
 tolerance, `2` could not run (bad configuration, divergence, unsupported flag).
@@ -495,6 +577,21 @@ python -m pycfd.main --case cylinder --geometry shield.csv \
     --t-end 120 --cfl 0.4 --name shield_run1 \
     --export-vtk --checkpoint --progress
 ```
+
+A body sized in metres, at a real speed and altitude, reported against the
+aircraft-length convention rather than the body's height:
+
+```bash
+python -m pycfd.main --case cylinder --geometry f22_side_profile.csv \
+    --l-ref 18.8 --wind-speed 70 --altitude 3000 \
+    --nx 320 --ny 240 --domain-length 80 --domain-height 60 \
+    --t-end 40 --name f22_70ms_3km --checkpoint
+```
+
+The report then carries both lengths (`reference_length` 18.8 next to
+`characteristic_length` 2.58, the profile's real height) and the conditions the
+Reynolds number came from, so nothing about the run has to be reconstructed
+later.
 
 Watch it develop instead, then keep going from where it stopped:
 
