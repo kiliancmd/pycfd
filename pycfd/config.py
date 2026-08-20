@@ -20,6 +20,15 @@ the classic non-dimensional form.  Cases whose reference length is *not* the
 domain size (flow past a cylinder, where ``l_ref`` is the diameter) must set
 ``l_ref`` explicitly, otherwise the Reynolds number of the simulation is not the
 Reynolds number that was asked for.
+
+``u_ref`` is the velocity scale the fields are *already* expressed in, not an
+annotation of how fast the real thing goes: force coefficients are divided by
+its square.  Raising it to a flight speed while an inlet still drives the flow
+at 1.0 therefore does not rescale the run, it only drives every reported
+coefficient towards zero.  :meth:`SimulationConfig.validate` refuses that
+combination outright; see :mod:`pycfd.units` for the supported route, which is
+to leave the solver at ``u_ref = 1``, put the real speed into the Reynolds
+number, and convert the results afterwards.
 """
 
 from __future__ import annotations
@@ -292,6 +301,25 @@ class SimulationConfig:
         unknown = set(self.boundary_config) - set(WALLS)
         if unknown:
             raise ValueError(f"boundary_config has unknown walls: {sorted(unknown)}")
+
+        # An inlet *is* the velocity scale.  Letting the two drift apart is the
+        # one configuration error that produces a plausible-looking run and a
+        # silently wrong answer -- forces come back divided by the wrong square
+        # -- so it is refused here rather than reported later.
+        # ``u_ref`` is a magnitude, so an inlet blowing the other way (a negative
+        # velocity, inflow from the right) is compared on magnitude too.
+        for wall, spec in self.boundary_config.items():
+            speed = abs(spec.velocity)
+            if spec.kind is BCKind.INLET and speed > 0 and \
+                    abs(speed - self.u_ref) > 1e-12 * max(1.0, self.u_ref):
+                raise ValueError(
+                    f"the {wall} inlet drives the flow at {spec.velocity:g} but "
+                    f"u_ref is {self.u_ref:g}; forces are normalised by u_ref^2, "
+                    "so the two must be the same speed. To run at a physical "
+                    "speed, keep u_ref equal to the inlet velocity and put the "
+                    "speed into 're' instead (see pycfd.units.reynolds_number "
+                    "and the --wind-speed flag)"
+                )
 
         # Periodicity must be declared on both walls of an axis or neither.
         for axis, (a, b) in (("x", ("left", "right")), ("y", ("bottom", "top"))):

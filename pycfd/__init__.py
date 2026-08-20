@@ -13,10 +13,12 @@ from .config import (
     SolverType,
     TimeScheme,
 )
+from .units import Scaling, atmosphere, reynolds_number
 
 __version__ = "1.0.0"
 
 __all__ = [
     "SimulationConfig", "BCSpec", "BCKind", "SolverType",
-    "TimeScheme", "AdvectionScheme", "PressureSolver", "__version__",
+    "TimeScheme", "AdvectionScheme", "PressureSolver",
+    "Scaling", "atmosphere", "reynolds_number", "__version__",
 ]
