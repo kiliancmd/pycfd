@@ -4,7 +4,9 @@ A 2D incompressible Navier–Stokes solver built around Chorin's projection meth
 on a staggered (MAC) grid. It runs the classic benchmarks — lid-driven cavity,
 Poiseuille channel, flow past a cylinder, Taylor–Green vortex — with live
 visualisation, quantitative validation against published data, and a grid
-convergence study that confirms second-order spatial accuracy.
+convergence study that confirms second-order spatial accuracy. Custom 2D bodies
+can be dropped into the flow from a vertex file or a bitmap, sized at a real
+wind speed and altitude, and read back out in m/s, Pa and seconds.
 
 This is a teaching and research-prototype code, comparable to an early-career
 research tool. It is not a production CFD suite: no 3D, no complex geometry, no
@@ -37,6 +39,13 @@ python -m pycfd.main --case cylinder --re 100 --live --display vorticity
 
 ```bash
 python -m pycfd.main --convergence
+```
+
+A custom body, sized against a real speed and altitude instead of a bare
+Reynolds number:
+
+```bash
+python -m pycfd.main --case cylinder --geometry f22_side_profile.csv --l-ref 18.8 --wind-speed 70 --altitude 3000
 ```
 
 Every case also runs headlessly and writes 300 DPI figures plus a validation
