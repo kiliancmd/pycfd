@@ -48,6 +48,33 @@ NOISE_FLOOR = 1.0e-9
 STRUCTURAL_BOUND = {"max_divergence": 1.0e-10, "cl_rms": 1.0e-8}
 DEFAULT_STRUCTURAL_BOUND = 1.0e-8
 
+#: L-infinity (max-norm) metrics need a wider tolerance than everything else,
+#: confirmed twice by actually reproducing the CI failure in the matching Linux
+#: container rather than guessed from theory:
+#:
+#:   observed_order_Linf: baseline 1.9965084716, Linux measured 1.9954561603
+#:                         (5.27e-4 relative)
+#:   finest_Linf:          baseline 9.558930812e-06, Linux measured 9.565905703e-06
+#:                         (7.30e-4 relative)
+#:
+#: L2 averages over every grid point, so a one-ULP wobble at a handful of cells
+#: barely moves the mean; L∞ is a *single* extremal point, which a different
+#: platform's SIMD/FMA instruction selection (Accelerate+NEON on the recording
+#: machine vs. OpenBLAS+AVX2 on the Linux runner -- floating-point addition is
+#: not associative, so vectorisation grouping the same reduction differently
+#: already changes the answer in the last few bits) can relocate to a different
+#: cell entirely. Any metric in this family is covered by name pattern, not by
+#: enumeration -- a future benchmark's own Linf metric should not have to
+#: rediscover this the same way. A genuine accuracy regression (order dropping
+#: from 2 towards 1, or a several-times-larger finest-grid error) is a change of
+#: several percent, so this still catches one with wide margin.
+LINF_RTOL = 3.0e-3
+
+
+def metric_rtol(metric: str) -> float:
+    """Relative tolerance for one metric, widened for the L∞ family."""
+    return LINF_RTOL if "Linf" in metric else DEFAULT_RTOL
+
 
 def check(case: str, metric: str, measured: float, expected: float) -> None:
     """Compare one metric against its baseline, relatively or absolutely."""
@@ -59,10 +86,11 @@ def check(case: str, metric: str, measured: float, expected: float) -> None:
             "bound -- something stopped being exactly conserved."
         )
         return
-    assert measured == pytest.approx(expected, rel=DEFAULT_RTOL), (
+    rtol = metric_rtol(metric)
+    assert measured == pytest.approx(expected, rel=rtol), (
         f"{case}.{metric} drifted: baseline {expected!r}, measured {measured!r} "
         f"(relative change {abs(measured - expected) / abs(expected):.2e}, "
-        f"tolerance {DEFAULT_RTOL:.0e}).\n"
+        f"tolerance {rtol:.0e}).\n"
         "If this change is intended, re-record with tools/record_baselines.py "
         "and commit the new baselines.json alongside the change that caused it."
     )
@@ -90,6 +118,48 @@ def test_every_baseline_records_the_parameters_that_produced_it():
     for case, entry in BASELINES["fast"].items():
         assert entry.get("params"), f"{case} records no parameters"
         assert entry.get("metrics"), f"{case} records no metrics"
+
+
+# --------------------------------------------------------------------------- #
+# The tolerance mechanics themselves
+# --------------------------------------------------------------------------- #
+#: Both gaps actually observed reproducing the CI failure inside a Linux
+#: container matching the runner, kept verbatim so the regression is pinned to
+#: the real numbers rather than a plausible-looking guess.
+_OBSERVED_CROSS_PLATFORM_GAPS = [
+    ("observed_order_Linf", 1.9965084715978074, 1.9954561603112215),
+    ("finest_Linf", 9.558930812225697e-06, 9.565905702890731e-06),
+]
+
+
+@pytest.mark.parametrize("metric,baseline,linux_measured", _OBSERVED_CROSS_PLATFORM_GAPS)
+def test_linf_tolerance_absorbs_the_measured_cross_platform_variation(
+    metric, baseline, linux_measured):
+    """Both gaps that actually failed in CI must now fit inside the bound."""
+    check("taylor_green_convergence", metric, linux_measured, baseline)
+
+
+@pytest.mark.parametrize("metric", ["observed_order_Linf", "finest_Linf",
+                                    "ghia_u_Linf", "ghia_v_Linf"])
+def test_every_linf_metric_gets_the_widened_tolerance(metric):
+    """The whole family is covered by pattern, not by a list to keep updating."""
+    assert metric_rtol(metric) == LINF_RTOL
+
+
+def test_linf_tolerance_still_catches_a_real_regression():
+    """Loosening for platform noise must not hide an actual accuracy loss."""
+    baseline = 1.9965084715978074
+    regressed = 1.85  # order dropping toward first-order is a real bug
+    with pytest.raises(AssertionError, match="drifted"):
+        check("taylor_green_convergence", "observed_order_Linf", regressed, baseline)
+
+
+def test_l2_metrics_do_not_get_the_widened_linf_tolerance():
+    """Only the Linf family is widened; L2-based metrics stay at the tight bound."""
+    assert metric_rtol("observed_order_L2") == DEFAULT_RTOL
+    assert metric_rtol("finest_L2") == DEFAULT_RTOL
+    with pytest.raises(AssertionError, match="drifted"):
+        check("cavity_re100", "ghia_u_L2", 0.006666347306871988 * 1.01, 0.006666347306871988)
 
 
 # --------------------------------------------------------------------------- #
