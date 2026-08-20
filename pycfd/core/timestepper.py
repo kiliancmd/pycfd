@@ -184,8 +184,15 @@ class TimeStepper:
                     break
 
                 dt = self.compute_dt(fields)
-                dt = min(dt, t_end - fields.t)      # land exactly on t_end
+                # Health is checked on the *un-clamped* adaptive step: only that
+                # value reflects the stability limits, and only a collapse in it
+                # is evidence of a genuine blow-up. The clamp below can shrink dt
+                # to an arbitrarily small, entirely benign sliver whenever
+                # floating-point drift in the running sum `fields.t` leaves less
+                # than a full step to `t_end` -- checking the *clamped* value
+                # here would misreport that normal rounding as divergence.
                 self._check_health(fields, dt)
+                dt = min(dt, t_end - fields.t)      # land exactly on t_end
 
                 self.solver.set_upwind_blend(self.solver.upwind_blend_for(fields, dt))
                 previous = fields

@@ -329,6 +329,43 @@ def test_blow_up_raises_instead_of_returning_garbage():
         TimeStepper(solver).run(solver.initialize(), t_end=1e4, max_steps=400)
 
 
+def test_landing_exactly_on_t_end_is_not_mistaken_for_divergence():
+    """A benign floating-point residual at the end of a run must not raise.
+
+    A run whose adaptive step stays ceiling-bound at a fixed dt for many steps
+    accumulates float round-off in the running sum of ``fields.t``.  Landing
+    fractionally short of ``t_end`` then forces one more, very small step to
+    close the gap -- entirely normal, and unrelated to numerical stability.
+    Feeding that *clamped* step into the divergence check used to raise a false
+    positive: five thousand additions of ``dt = 0.02`` leave a residual of
+    ``2.757e-12`` before reaching ``t = 100``, comfortably under
+    ``MIN_TIME_STEP`` (``1e-8``), which used to be reported as a collapsed step.
+    """
+    cfg = make_config(nx=8, ny=8, re=1000.0, dt=0.02, adaptive_dt=True,
+                      cfl_max=0.9, boundary_config=walls())
+    solver = ProjectionSolver(cfg)
+    result = TimeStepper(solver).run(solver.initialize(), t_end=100.0)
+
+    assert result.time == pytest.approx(100.0)
+    assert result.fields.is_finite()
+    assert solver.max_divergence(result.fields) < 1e-11
+
+
+def test_genuine_collapse_is_still_caught_after_the_fix():
+    """The fix must not loosen detection of an actually collapsing step.
+
+    Unlike the benign end-of-run residual above, a *genuinely* shrinking
+    adaptive step -- the un-clamped value returned by ``compute_dt`` itself --
+    must still raise.  Forced here with a viscosity high enough that the
+    viscous stability limit alone is already below ``MIN_TIME_STEP``.
+    """
+    cfg = make_config(nx=512, ny=512, re=1e-6, dt=1.0, adaptive_dt=True,
+                      cfl_max=0.9, boundary_config=walls())
+    solver = ProjectionSolver(cfg)
+    with pytest.raises(DivergenceError, match="collapsed"):
+        TimeStepper(solver).run(solver.initialize(), t_end=1.0)
+
+
 def test_simple_solver_is_reported_as_unimplemented():
     cfg = cavity_config(solver_type=SolverType.SIMPLE)
     with pytest.raises(NotImplementedError, match="simple"):
