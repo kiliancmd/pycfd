@@ -167,17 +167,35 @@ class Simulation:
     # ------------------------------------------------------------------ #
     # Output
     # ------------------------------------------------------------------ #
+    def provenance(self, **extra) -> dict:
+        """Record describing this run, for embedding in anything it writes.
+
+        Carries the configuration and the live diagnostics, so an exported file
+        records not just how the run was set up but what it had converged to.
+        """
+        from ..analysis.provenance import provenance_record
+
+        facts = {k: v for k, v in self.diagnostics().items()}
+        if self.obstacle is not None:
+            facts["obstacle"] = self.obstacle.name
+            facts["characteristic_length"] = self.obstacle.characteristic_length
+        facts.update(extra)
+        return provenance_record(self.config, extra=facts)
+
     def save_checkpoint(self, path: str | Path) -> Path:
         """Write a restartable checkpoint."""
-        return export_mod.save_checkpoint(self.fields, self.config, path)
+        return export_mod.save_checkpoint(self.fields, self.config, path,
+                                          provenance=self.provenance())
 
     def export_vtk(self, path: str | Path) -> Path:
         """Write the current field as a legacy VTK file."""
-        return export_mod.export_vtk(self.fields, path, self.config.name)
+        return export_mod.export_vtk(self.fields, path, self.config.name,
+                                     provenance=self.provenance())
 
     def export_csv(self, path: str | Path) -> Path:
         """Write the current field as CSV."""
-        return export_mod.export_csv(self.fields, path)
+        return export_mod.export_csv(self.fields, path,
+                                     provenance=self.provenance())
 
     def __repr__(self) -> str:
         return (

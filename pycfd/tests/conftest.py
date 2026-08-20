@@ -60,9 +60,16 @@ def make_config(**kw) -> SimulationConfig:
 
 def cavity_config(nx=24, ny=24, re=100.0, **kw) -> SimulationConfig:
     """Small lid-driven cavity configuration for fast tests."""
+    # Every hardcoded keyword is popped from kw first, so a caller can override
+    # any of them without triggering a duplicate-keyword TypeError.
     return make_config(
-        nx=nx, ny=ny, re=re, dt=kw.pop("dt", 2.0e-3), t_end=kw.pop("t_end", 1.0),
-        boundary_config=walls(top=(BCKind.MOVING_WALL, 1.0)), name="test_cavity", **kw
+        nx=nx, ny=ny, re=re,
+        dt=kw.pop("dt", 2.0e-3),
+        t_end=kw.pop("t_end", 1.0),
+        name=kw.pop("name", "test_cavity"),
+        boundary_config=kw.pop("boundary_config",
+                               walls(top=(BCKind.MOVING_WALL, 1.0))),
+        **kw
     )
 
 
@@ -79,3 +86,35 @@ def taylor_green_fields(mesh, t=0.0, nu=0.05):
     Xv, Yv = mesh.v_grid()
     decay = np.exp(-2.0 * nu * t)
     return -np.cos(Xu) * np.sin(Yu) * decay, np.sin(Xv) * np.cos(Yv) * decay
+
+
+# --------------------------------------------------------------------------- #
+# Slow-test gate
+# --------------------------------------------------------------------------- #
+# The full-fidelity benchmark regressions rerun the published cases at their
+# real resolutions and take minutes, not seconds.  They are worth having --
+# they are what pins the numbers the README quotes -- but not on every run, so
+# they are opt-in via ``--runslow`` rather than deselected by a marker
+# expression the caller has to remember.
+def pytest_addoption(parser):
+    """Register ``--runslow``."""
+    parser.addoption(
+        "--runslow", action="store_true", default=False,
+        help="also run the full-fidelity benchmark regressions (several minutes)",
+    )
+
+
+def pytest_configure(config):
+    """Declare the ``slow`` marker so strict-marker runs accept it."""
+    config.addinivalue_line(
+        "markers", "slow: full-fidelity benchmark rerun; requires --runslow")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip anything marked ``slow`` unless ``--runslow`` was given."""
+    if config.getoption("--runslow"):
+        return
+    skip_slow = pytest.mark.skip(reason="full-fidelity benchmark; pass --runslow")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)

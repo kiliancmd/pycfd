@@ -278,11 +278,23 @@ def time_series_figure(history: dict, keys=("kinetic_energy", "max_div", "dt"),
     return fig
 
 
-def _save(fig, path: str | Path) -> Path:
-    """Save at :data:`FIGURE_DPI` and close the figure."""
+def _save(fig, path: str | Path, provenance: dict | None = None) -> Path:
+    """Save at :data:`FIGURE_DPI` and close the figure.
+
+    PNG output carries the run's provenance in standard ``tEXt`` chunks, so a
+    figure that has drifted away from its results directory can still say which
+    command produced it.  Any tool that reads PNG metadata will surface it.
+    """
+    from ..analysis.provenance import png_metadata, provenance_record
+
     plt = _plt()
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=FIGURE_DPI, bbox_inches="tight")
+
+    kwargs = {"dpi": FIGURE_DPI, "bbox_inches": "tight"}
+    if path.suffix.lower() == ".png":
+        record = provenance_record() if provenance is None else provenance
+        kwargs["metadata"] = png_metadata(record)
+    fig.savefig(path, **kwargs)
     plt.close(fig)
     return path

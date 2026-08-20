@@ -18,6 +18,7 @@ from ..config import SimulationConfig
 from ..core.fields import FlowField
 from ..core.mesh import StructuredMesh
 from .postprocess import vorticity
+from .provenance import provenance_record, summary_line, write_sidecar
 
 
 def _cell_data(fields: FlowField) -> dict[str, np.ndarray]:
@@ -35,14 +36,19 @@ def _cell_data(fields: FlowField) -> dict[str, np.ndarray]:
 # --------------------------------------------------------------------------- #
 # VTK
 # --------------------------------------------------------------------------- #
-def export_vtk(fields: FlowField, path: str | Path, name: str = "pycfd") -> Path:
+def export_vtk(fields: FlowField, path: str | Path, name: str = "pycfd",
+               provenance: dict | None = None) -> Path:
     """Write a legacy ASCII VTK ``RECTILINEAR_GRID`` file.
 
     Cell-centre coordinates become grid points carrying ``POINT_DATA``, which is
     what ParaView's contour and streamline filters expect.  The legacy format is
     written directly so the package needs no ``vtk`` dependency.
+
+    The format's single free-text title line carries a provenance digest, and
+    the full record is written to a ``.provenance.json`` sidecar.
     """
     path = Path(path)
+    record = provenance_record() if provenance is None else provenance
     path.parent.mkdir(parents=True, exist_ok=True)
     mesh = fields.mesh
     data = _cell_data(fields)
@@ -54,7 +60,9 @@ def export_vtk(fields: FlowField, path: str | Path, name: str = "pycfd") -> Path
 
     with path.open("w", encoding="ascii") as fh:
         fh.write("# vtk DataFile Version 3.0\n")
-        fh.write(f"{name} t={fields.t:.6g} step={fields.step}\n")
+        # The title is the one free-text slot the legacy format offers.
+        fh.write(f"{name} t={fields.t:.6g} step={fields.step} "
+                 f"[{summary_line(record, limit=180)}]\n")
         fh.write("ASCII\nDATASET RECTILINEAR_GRID\n")
         fh.write(f"DIMENSIONS {nx} {ny} 1\n")
         fh.write(f"X_COORDINATES {nx} float\n")
@@ -72,15 +80,22 @@ def export_vtk(fields: FlowField, path: str | Path, name: str = "pycfd") -> Path
         uu, vv = flat(data["u"]), flat(data["v"])
         fh.write("\n".join(f"{a:.7g} {b:.7g} 0" for a, b in zip(uu, vv)) + "\n")
 
+    write_sidecar(path, record)
     return path
 
 
 # --------------------------------------------------------------------------- #
 # CSV
 # --------------------------------------------------------------------------- #
-def export_csv(fields: FlowField, path: str | Path) -> Path:
-    """Write one row per cell: ``x, y, u, v, speed, pressure, vorticity``."""
+def export_csv(fields: FlowField, path: str | Path,
+               provenance: dict | None = None) -> Path:
+    """Write one row per cell: ``x, y, u, v, speed, pressure, vorticity``.
+
+    The file itself stays pure data -- a comment banner would break readers that
+    do not expect one -- so provenance goes to a ``.provenance.json`` sidecar.
+    """
     path = Path(path)
+    record = provenance_record() if provenance is None else provenance
     path.parent.mkdir(parents=True, exist_ok=True)
     mesh = fields.mesh
     data = _cell_data(fields)
@@ -95,6 +110,7 @@ def export_csv(fields: FlowField, path: str | Path) -> Path:
         writer.writerow(columns)
         for row in stacked:
             writer.writerow([f"{val:.9g}" for val in row])
+    write_sidecar(path, record)
     return path
 
 
@@ -120,19 +136,41 @@ def export_profile_csv(path: str | Path, columns: dict[str, np.ndarray]) -> Path
 # Checkpoints
 # --------------------------------------------------------------------------- #
 def save_checkpoint(fields: FlowField, config: SimulationConfig,
-                    path: str | Path) -> Path:
-    """Save the raw ghosted state plus the configuration for an exact restart."""
+                    path: str | Path, provenance: dict | None = None) -> Path:
+    """Save the raw ghosted state plus the configuration for an exact restart.
+
+    The provenance record is stored inside the archive as well as beside it, so
+    a checkpoint moved on its own still knows where it came from.
+    """
     path = Path(path)
     if path.suffix != ".npz":
         path = path.with_suffix(".npz")
     path.parent.mkdir(parents=True, exist_ok=True)
+    record = provenance_record(config) if provenance is None else provenance
     np.savez_compressed(
         path,
         u=fields.u, v=fields.v, p=fields.p,
         t=np.array(fields.t), step=np.array(fields.step),
         config=np.array(config.to_json()),
+        provenance=np.array(json.dumps(record)),
     )
+    write_sidecar(path, record)
     return path
+
+
+def checkpoint_provenance(path: str | Path) -> dict | None:
+    """Read the provenance embedded in a checkpoint, if it carries one.
+
+    Returns ``None`` for checkpoints written before provenance was recorded, so
+    older files stay loadable.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"checkpoint not found: {path}")
+    with np.load(path, allow_pickle=False) as npz:
+        if "provenance" not in npz.files:
+            return None
+        return json.loads(str(npz["provenance"]))
 
 
 def load_checkpoint(path: str | Path) -> tuple[FlowField, SimulationConfig]:
