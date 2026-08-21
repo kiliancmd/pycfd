@@ -640,6 +640,56 @@ inflates the very band it is being measured against. What gives that away is
 its transient reports hundreds, with a handful of effective samples. Read those
 two together before trusting a mean.
 
+#### Is it actually shedding?
+
+`strouhal_number()` answers "where is the largest peak in the spectrum?" — and
+it answers it for anything. Hand it white noise and it reports `St = 9.27`;
+hand it a linear drift and it reports `0.0100`. Every signal has a strongest
+frequency, so a peak-picker never says no.
+
+The cylinder case now decides properly, and reports why:
+
+```
+  strouhal                     0.183294
+  shedding_detected            1
+  shedding_periodicity         0.991818
+  shedding_concentration       0.970982
+  shedding_periods             10.9635
+    [PASS] vortex shedding developed: St = 0.1831 over 11.0 periods,
+           periodicity 0.99, lift peak-to-peak 0.420; literature 0.16-0.172
+```
+
+Three things all have to hold, because each is easy to fool alone:
+
+| measure | asks | fails on |
+|---|---|---|
+| `shedding_periodicity` | does the signal *repeat*? Autocorrelation at a lag of exactly one period — 1.0 for a clean tone, ~0 for noise | noise, drift, decay |
+| `shedding_concentration` | is the power in a narrow band, or spread across the spectrum? | broadband wobble |
+| `shedding_periods` | has enough been seen for a frequency to be measured at all? | a run stopped too early |
+
+The periodicity test is the one a peak-picker lacks, and it is deliberately
+independent of the spectrum that proposed the period in the first place.
+
+When detection fails the report says which measure failed and what to do:
+
+```
+    [FAIL] vortex shedding developed: only 22 samples after discarding the
+           transient, below the 32 a spectrum needs
+```
+
+That is the failure an F-22 run hit: a wake that had not begun shedding still
+produced a confident Strouhal number, and nothing in the output said so. The
+detector is available directly for any signal:
+
+```python
+from pycfd.analysis.shedding import detect_shedding
+
+signal = detect_shedding(probe.t, probe.v, l_ref=1.0, u_ref=1.0)
+print(signal.report())
+if signal.detected:
+    print(signal.strouhal, signal.periods_observed)
+```
+
 #### Grid-refinement studies
 
 `--convergence` refines whichever case `--case` names and reports what moved:

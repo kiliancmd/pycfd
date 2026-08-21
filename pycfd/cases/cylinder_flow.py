@@ -34,6 +34,7 @@ from pathlib import Path
 import numpy as np
 
 from ..analysis.postprocess import Probe, force_coefficients, strouhal_number
+from ..analysis.shedding import detect_shedding
 from ..analysis.timeseries import time_average
 from ..config import BCKind, BCSpec, SimulationConfig
 from ..geometry.obstacles import circle_mask
@@ -68,6 +69,12 @@ REFERENCE_ST = {100: (0.160, 0.172)}
 
 #: Fraction of the record discarded before averaging force coefficients.
 TRANSIENT_FRACTION = 0.5
+
+#: Transverse velocity swing in the wake below which an oscillation is too
+#: small to be the vortex street, however cleanly periodic it looks.  The
+#: symmetric solution is an exact discrete steady state, so what survives below
+#: this is the start-up pulse decaying, not shedding.
+SHEDDING_MIN_AMPLITUDE = 0.02
 
 #: What a grid study on this case should watch.  Both are *measured
 #: quantities*, not errors: an immersed boundary on a Cartesian grid has no
@@ -446,18 +453,30 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
 
     if re >= 50 and geometry is None:
         series = probe.as_arrays()
+        # The wake probe decides, not the lift amplitude: a peak-to-peak swing
+        # says the signal is large, which a monotone drift also manages. What
+        # matters is whether it repeats, over enough cycles to have been
+        # measured -- see pycfd.analysis.shedding.
+        signal = detect_shedding(series["t"], series["v"], reference_length,
+                                 U_INF, transient_fraction,
+                                 min_amplitude=SHEDDING_MIN_AMPLITUDE)
         st = strouhal_number(series["t"], series["v"], reference_length, U_INF)
         metrics["strouhal"] = st
+        metrics["shedding_detected"] = float(signal.detected)
+        metrics["shedding_periodicity"] = signal.periodicity
+        metrics["shedding_concentration"] = signal.concentration
+        metrics["shedding_periods"] = signal.periods_observed
         metrics["cl_peak_to_peak"] = (
             float(cl[settled].max() - cl[settled].min()) if settled.any() else float("nan")
         )
-        shedding = bool(metrics["cl_peak_to_peak"] > 0.05)
-        checks.append((
-            "vortex shedding developed", shedding,
-            f"lift oscillation peak-to-peak = {metrics['cl_peak_to_peak']:.3f}, St = {st:.4f}"
+        detail = (
+            f"St = {signal.strouhal:.4f} over {signal.periods_observed:.1f} "
+            f"periods, periodicity {signal.periodicity:.2f}, lift peak-to-peak "
+            f"{metrics['cl_peak_to_peak']:.3f}"
             + (f"; literature {REFERENCE_ST[key][0]}-{REFERENCE_ST[key][1]}"
-               if key in REFERENCE_ST else ""),
-        ))
+               if key in REFERENCE_ST else "")
+        ) if signal.detected else signal.reason
+        checks.append(("vortex shedding developed", signal.detected, detail))
 
     outputs: list[Path] = []
     if make_plots:

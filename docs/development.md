@@ -11,7 +11,7 @@ solver represents.
 python -m pytest pycfd/tests -q
 ```
 
-429 tests covering mesh geometry, obstacle construction from every supported
+449 tests covering mesh geometry, obstacle construction from every supported
 source, all six boundary condition types, Poisson assembly and all four linear
 solvers, discrete conservation, the analytical benchmarks, dimensional
 bookkeeping, CLI plumbing, output provenance, and the export round-trips — plus
@@ -39,7 +39,14 @@ Notable invariants under test:
   `f(h) = f_exact + C h^p`, hand it three grids, and require `p` and `f_exact`
   back — on uneven grid ladders as well as doubling ones, since only an uneven
   ladder can catch a swapped refinement ratio; and a diverging triplet is
-  refused rather than extrapolated.
+  refused rather than extrapolated;
+- the autocorrelation time of an AR(1) process comes back as its analytical
+  `(1+φ)/(1-φ)`, and doubling a record's sampling rate leaves the reported
+  error bar unchanged — the property a naive `s/√N` gets wrong;
+- shedding detection **refuses** white noise, a linear drift, an exponential
+  decay and a record spanning too few periods. Each is a signal
+  `strouhal_number()` answers with a confident frequency, so the negative cases
+  are the ones under test.
 
 ---
 
@@ -182,6 +189,9 @@ pycfd/
 ├── analysis/
 │   ├── postprocess.py   Vorticity, stream function, forces, probes
 │   ├── validation.py    Analytical solutions, Ghia data, error norms
+│   ├── timeseries.py    Correlated-sample averaging: autocorrelation time,
+│   │                    effective sample size, stationarity
+│   ├── shedding.py      Is a wake periodic, or does it merely have a peak?
 │   ├── richardson.py    Richardson extrapolation + GCI, and the regime check
 │   │                    that decides whether either is worth reporting
 │   ├── provenance.py    What produced a given output file
@@ -192,8 +202,8 @@ pycfd/
 ├── cases/               cavity, channel, cylinder, taylor_green; plus the
 │                        grid-study driver they share
 ├── tests/               mesh, geometry, boundary, pressure, solver, validation,
-│                        units, timeseries, gridstudy, richardson, cli,
-│                        provenance, regression
+│                        units, timeseries, shedding, gridstudy, richardson,
+│                        cli, provenance, regression + baselines.json
 │                        + baselines.json
 ├── config.py            Dataclass configuration; every constant lives here
 ├── units.py             ISA atmosphere and the solver-unit <-> SI bridge
