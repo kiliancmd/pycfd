@@ -34,6 +34,7 @@ from pathlib import Path
 import numpy as np
 
 from ..analysis.postprocess import Probe, force_coefficients, strouhal_number
+from ..analysis.timeseries import time_average
 from ..config import BCKind, BCSpec, SimulationConfig
 from ..geometry.obstacles import circle_mask
 from ..physics.incompressible import Simulation
@@ -303,7 +304,8 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
         geometry_scale: float = 1.0, geometry_rotate: float = 0.0,
         outlet_type: str | None = None, p_ref: float | None = None,
         l_ref: float | None = None, wind_speed: float | None = None,
-        altitude: float | None = None, **overrides):
+        altitude: float | None = None, transient: float | None = None,
+        **overrides):
     """Run the cylinder case, measure Cd/St and write the figures.
 
     Passing ``geometry`` (a path to a vertex file or bitmap) substitutes a
@@ -314,6 +316,14 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
     When flight conditions are given, the report also carries the dimensional
     facts they imply -- speed, altitude, Mach number and the free-stream dynamic
     pressure -- so the run records what it was actually a simulation *of*.
+
+    ``transient`` is the fraction of the record discarded before the force
+    coefficients are averaged, defaulting to :data:`TRANSIENT_FRACTION`.  The
+    mean that comes back carries a confidence band built from the number of
+    *independent* samples rather than the number of writes, and a check on
+    whether the retained window was actually stationary -- see
+    :mod:`pycfd.analysis.timeseries`.  Raise it when a run started far from its
+    eventual state.
     """
     from . import CaseResult
 
@@ -353,10 +363,18 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
     t = np.asarray(history["t"])
     cd = np.asarray(history["cd"])
     cl = np.asarray(history["cl"])
-    settled = t > TRANSIENT_FRACTION * t[-1] if t.size else np.array([], dtype=bool)
+    transient_fraction = TRANSIENT_FRACTION if transient is None else float(transient)
+    settled = (t > transient_fraction * t[-1] if t.size
+               else np.array([], dtype=bool))
+
+    # The mean of a shedding wake is a mean of correlated samples, so its
+    # uncertainty follows the number of independent observations rather than
+    # the number of times the callback fired.
+    cd_average = time_average(t, cd, transient_fraction)
 
     metrics: dict[str, float] = {
-        "cd_mean": float(cd[settled].mean()) if settled.any() else float("nan"),
+        "cd_mean": cd_average.mean,
+        "cd_uncertainty": cd_average.uncertainty,
         "cd_final": float(cd[-1]) if cd.size else float("nan"),
         "cl_rms": float(np.sqrt(np.mean(cl[settled] ** 2))) if settled.any() else float("nan"),
         # The body's own extent across the flow: what the grid has to resolve
@@ -368,6 +386,13 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
         # unless --l-ref asked for a different convention.
         "reference_length": reference_length,
         "reynolds": re,
+        # What the average is actually built on: how much of the record was
+        # kept, and how many independent observations that amounted to.
+        "transient_fraction": transient_fraction,
+        "averaging_samples": cd_average.n_samples,
+        "effective_samples": cd_average.effective_samples,
+        "autocorrelation_time": cd_average.autocorrelation_time,
+        "cd_drift_z": cd_average.drift_z,
         "steps": result.steps,
         "final_time": result.time,
         "wall_time_s": result.wall_time,
@@ -400,7 +425,23 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
         # generous band is used and the literature range is always reported.
         checks.append((
             f"Cd at Re={key}", bool(lo * 0.7 <= cd_mean <= hi * 1.4),
-            f"Cd = {cd_mean:.3f}; unbounded literature range {lo}-{hi}",
+            # The band is formatted with a significant-figure spec rather than a
+            # fixed one: a well-converged run's uncertainty is small enough that
+            # three decimals round it to "0.000", which reads as no band at all.
+            f"Cd = {cd_mean:.3f} ± {cd_average.uncertainty:.3g}; "
+            f"unbounded literature range {lo}-{hi}",
+        ))
+
+    # A mean taken over a window that had not settled is a number with no
+    # meaning, however tight its error bar looks -- so it is checked, not just
+    # reported. Only worth asking once there is a record to ask it of.
+    if cd_average.n_samples >= 4:
+        checks.append((
+            "force average is stationary", cd_average.stationary,
+            f"the two halves of the averaging window differ by "
+            f"{cd_average.drift_z:.1f} standard errors"
+            + ("" if cd_average.stationary else
+               f"; raise --transient above {transient_fraction:g} or run longer"),
         ))
 
     if re >= 50 and geometry is None:

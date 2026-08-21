@@ -109,6 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
     flow.add_argument("--altitude", type=float, default=None, metavar="Z",
                       help="altitude in metres, selecting the ISA air properties "
                            "--wind-speed uses (default: sea level)")
+    flow.add_argument("--transient", type=float, default=None, metavar="F",
+                      help="fraction of the record discarded as start-up "
+                           "transient before the force coefficients are "
+                           "averaged (default 0.5). The report says whether the "
+                           "window that remained was actually stationary, so "
+                           "raise this when it says no")
 
     geom = p.add_argument_group("custom geometry (external-flow / cylinder case)")
     geom.add_argument("--geometry", default=None, metavar="FILE",
@@ -202,11 +208,26 @@ CASE_SPECIFIC_FLAGS = {
     "l_ref": ("--l-ref", "body in the flow to measure a reference length on"),
     "wind_speed": ("--wind-speed", "body in the flow to size a Reynolds number against"),
     "altitude": ("--altitude", "body in the flow to size a Reynolds number against"),
+    "transient": ("--transient", "force history to average over a window of"),
 }
 
 
 def _case_accepts(case_name: str, param: str) -> bool:
-    """Whether a case's ``build`` declares ``param``."""
+    """Whether a case declares ``param`` on either entry point.
+
+    Both are consulted because the two kinds of case-specific option live in
+    different places: what the simulation *is* belongs to ``build``, while how
+    its record is reduced afterwards -- an averaging window, say -- only exists
+    once ``run`` has a record to reduce.  A flag is supported if either
+    understands it.
+    """
+    module = load_case(case_name)
+    return any(param in inspect.signature(entry).parameters
+               for entry in (module.build, module.run))
+
+
+def _build_accepts(case_name: str, param: str) -> bool:
+    """Whether ``build`` alone declares ``param`` -- what the live viewer can use."""
     return param in inspect.signature(load_case(case_name).build).parameters
 
 
@@ -323,7 +344,15 @@ def run_live(args: argparse.Namespace) -> int:
     kwargs = case_kwargs(args)
     if args.case != "channel":
         kwargs.pop("mode", None)          # only the channel has a mode variant
-    kwargs.update(case_specific_kwargs(args))
+    # The live viewer animates a Simulation, so only what ``build`` understands
+    # can reach it. Flags that reduce a finished record -- --transient and its
+    # kind -- have nothing to act on here; the viewer writes no report.
+    for param, value in case_specific_kwargs(args).items():
+        if _build_accepts(args.case, param):
+            kwargs[param] = value
+        else:
+            log.info("%s applies to the written report, not the live view; "
+                     "ignoring it here", CASE_SPECIFIC_FLAGS[param][0])
 
     if args.resume:
         from .physics.incompressible import Simulation

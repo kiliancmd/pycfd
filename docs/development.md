@@ -11,7 +11,7 @@ solver represents.
 python -m pytest pycfd/tests -q
 ```
 
-396 tests covering mesh geometry, obstacle construction from every supported
+429 tests covering mesh geometry, obstacle construction from every supported
 source, all six boundary condition types, Poisson assembly and all four linear
 solvers, discrete conservation, the analytical benchmarks, dimensional
 bookkeeping, CLI plumbing, output provenance, and the export round-trips — plus
@@ -192,8 +192,8 @@ pycfd/
 ├── cases/               cavity, channel, cylinder, taylor_green; plus the
 │                        grid-study driver they share
 ├── tests/               mesh, geometry, boundary, pressure, solver, validation,
-│                        units, gridstudy, richardson, cli, provenance,
-│                        regression
+│                        units, timeseries, gridstudy, richardson, cli,
+│                        provenance, regression
 │                        + baselines.json
 ├── config.py            Dataclass configuration; every constant lives here
 ├── units.py             ISA atmosphere and the solver-unit <-> SI bridge

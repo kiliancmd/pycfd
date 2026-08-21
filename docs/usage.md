@@ -532,6 +532,7 @@ any file to launch a run. `python -m pycfd.main --help` prints the same list.
 | `--l-ref L` | the body's span across the flow | reference length for `Re`, `Cd`, `Cl` and `St`, in the geometry's units |
 | `--wind-speed V` | none | free-stream speed in m/s; derives `Re` from it and the ISA viscosity. Mutually exclusive with `--re` |
 | `--altitude Z` | `0` (sea level) | altitude in metres, selecting the ISA air properties `--wind-speed` uses |
+| `--transient F` | `0.5` | fraction of the record discarded before the force coefficients are averaged |
 
 **Outflow boundary** †
 
@@ -592,6 +593,52 @@ also on `channel --mode developing`). Using one where it cannot apply is an
 
 Exit codes: `0` ran and validated, `1` ran but a validation check missed its
 tolerance, `2` could not run (bad configuration, divergence, unsupported flag).
+
+#### Averaged forces, and what the average is worth
+
+A drag coefficient measured on a shedding wake is not a number, it is a
+distribution sampled over time. The cylinder case discards a start-up window
+and averages the rest; `--transient F` sets how much is discarded (0.5 by
+default), and the report says what the remaining window was worth:
+
+```
+  cd_mean                      1.4081
+  cd_uncertainty               0.000731784
+  averaging_samples            251
+  effective_samples            58.085
+  autocorrelation_time         4.32125
+  cd_drift_z                   0.562948
+  validation:
+    [PASS] Cd at Re=100: Cd = 1.408 ± 0.000732; unbounded literature range 1.32-1.4
+    [PASS] force average is stationary: the two halves of the averaging window differ by 0.6 standard errors
+```
+
+**Why the error bar is not `s/√N`.** Consecutive samples of a shedding wake are
+close to the same measurement — the force history is written every ten steps,
+so a shedding cycle spans tens of writes. Using `√N` there would report an
+uncertainty that shrinks with the *sampling rate*: write twice as often and the
+error bar halves, which is plainly false. The band is built instead from the
+integrated autocorrelation time `τ`, so `effective_samples = N/τ` counts
+independent observations rather than writes — 251 samples above are worth 58.
+Sampling more often raises `averaging_samples` and `τ` together and leaves the
+band where it was, as it must.
+
+**Was the transient long enough?** The retained window is split in half and the
+two means compared against their own combined uncertainty. A record still
+sliding down from start-up has a first half measurably above its second, and
+`cd_drift_z` reports that in standard errors. Beyond ±2 the run fails the
+stationarity check and tells you to raise `--transient` or run longer.
+
+Two refinements keep the check honest in opposite directions. A drift smaller
+than one part in a thousand of the mean is *not* reported as a failure however
+many standard errors wide it is — a well-converged steady wake has almost no
+scatter left, so parts-per-million of residual drift would otherwise condemn
+exactly the runs that went best. And a record whose transient still dominates
+it defeats the z-score entirely, because the trend is read as correlation and
+inflates the very band it is being measured against. What gives that away is
+`autocorrelation_time`: a settled record reports `τ` near 1, one still carrying
+its transient reports hundreds, with a handful of effective samples. Read those
+two together before trusting a mean.
 
 #### Grid-refinement studies
 
