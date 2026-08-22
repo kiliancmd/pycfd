@@ -158,7 +158,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="convective discretisation")
     num.add_argument("--pressure-solver", default=None,
                      choices=[s.value for s in PressureSolver],
-                     help="pressure Poisson solver")
+                     help="pressure Poisson solver. 'direct' (the default) is "
+                          "fastest until its LU factors outgrow memory; 'mgcg' "
+                          "costs O(N) storage instead and is the one to reach "
+                          "for on a large grid")
+    num.add_argument("--mg-sweeps", type=int, default=None, metavar="N",
+                     help="damped-Jacobi sweeps on each side of a multigrid "
+                          "V-cycle (default 1). Only read by the 'multigrid' "
+                          "and 'mgcg' pressure solvers")
     les = num.add_mutually_exclusive_group()
     les.add_argument("--les", dest="use_les", action="store_true", default=None,
                      help="enable the Smagorinsky sub-grid-scale model")
@@ -305,6 +312,8 @@ def case_kwargs(args: argparse.Namespace) -> dict:
         overrides["advection_scheme"] = AdvectionScheme(args.advection)
     if args.pressure_solver is not None:
         overrides["pressure_solver"] = PressureSolver(args.pressure_solver)
+    if args.mg_sweeps is not None:
+        overrides["mg_sweeps"] = args.mg_sweeps
     if args.use_les is not None:
         overrides["use_les"] = args.use_les
     if args.name is not None:

@@ -78,6 +78,8 @@ class PressureSolver(str, Enum):
     CG = "cg"                   # conjugate gradient (symmetric singular system)
     JACOBI = "jacobi"           # stationary, for educational transparency
     SOR = "sor"                 # red/black successive over-relaxation
+    MULTIGRID = "multigrid"     # aggregation multigrid V-cycles, standalone
+    MGCG = "mgcg"               # conjugate gradient preconditioned by a V-cycle
 
 
 class BCKind(str, Enum):
@@ -164,6 +166,12 @@ DEFAULT_POISSON_MAXITER = 20_000
 #: Over-relaxation factor for SOR.  1.0 recovers plain Gauss-Seidel.
 DEFAULT_SOR_OMEGA = 1.8
 
+#: Damped-Jacobi sweeps on each side of the coarse-grid correction in a
+#: multigrid V-cycle.  One is the cheaper cycle and two is the better one; which
+#: wins on wall time depends on the grid, so this is a knob rather than a
+#: constant.  See :mod:`pycfd.core.multigrid`.
+DEFAULT_MG_SWEEPS = 1
+
 
 # --------------------------------------------------------------------------- #
 # Main configuration object
@@ -207,6 +215,7 @@ class SimulationConfig:
     poisson_tol: float = DEFAULT_POISSON_TOL
     poisson_maxiter: int = DEFAULT_POISSON_MAXITER
     sor_omega: float = DEFAULT_SOR_OMEGA
+    mg_sweeps: int = DEFAULT_MG_SWEEPS
 
     use_numba: bool = True          # use fused JIT stencils when numba is present
 
@@ -290,6 +299,11 @@ class SimulationConfig:
             )
         if not 0 < self.sor_omega < 2:
             raise ValueError(f"sor_omega must lie in (0, 2), got {self.sor_omega}")
+        if self.mg_sweeps < 1:
+            raise ValueError(
+                f"mg_sweeps must be at least 1, got {self.mg_sweeps}: a V-cycle "
+                "with no smoothing does nothing but move error between grids"
+            )
         if self.smagorinsky_cs < 0:
             raise ValueError("smagorinsky_cs must be non-negative")
         if self.max_steps is not None and self.max_steps < 1:

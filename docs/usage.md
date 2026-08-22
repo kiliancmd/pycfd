@@ -344,7 +344,8 @@ The remaining settings, all on `SimulationConfig`:
 | `steady_tol` | None | **steady-state threshold** — stop once `max\|du/dt\|` falls below it. `None` runs the full `t_end` |
 | `time_scheme` | `rk3` | **time integrator**. `euler` and `rk2` exist but are unstable for central advection |
 | `advection_scheme` | `central` | **convective discretisation**. `central` is 2nd-order and non-diffusive; `upwind` adds damping when a high-Re run will not stay bounded |
-| `pressure_solver` | `direct` | **linear solver** for the pressure equation: `direct` (factorised once), or `cg` / `sor` / `jacobi` |
+| `pressure_solver` | `direct` | **linear solver** for the pressure equation: `direct` (factorised once), `mgcg` (multigrid-preconditioned CG — see [Choosing a pressure solver](#choosing-a-pressure-solver)), or `cg` / `sor` / `jacobi` / `multigrid` |
+| `mg_sweeps` | 1 | smoothing sweeps on each side of a multigrid V-cycle. Only read by `mgcg` and `multigrid` |
 | `body_force` | (0, 0) | **force per unit mass** `(fx, fy)` applied everywhere — this is what drives the periodic channel |
 | `use_les` | False | enable the **Smagorinsky sub-grid model** for under-resolved turbulence |
 | `stretch_x`, `stretch_y` | 1.0, 1.0 | geometric cell-growth ratios. The mesh supports them; **the solver does not** and will raise |
@@ -361,6 +362,88 @@ configuration cannot reach the solver.
 > slower than necessary. Set `dt` to the largest step you would accept (`0.02`
 > is reasonable for a unit-velocity external flow) and let the CFL and viscous
 > limits do the rest.
+
+### Choosing a pressure solver
+
+Nothing else in a step costs what the pressure solve costs. Under the default
+RK3 the projection runs three times per step, and on the cylinder case that is
+55% of the wall time at 128×64 and 82% at 512×256. So this is the one numerical
+choice worth making deliberately.
+
+`direct` is the default and it is hard to beat. It factorises the operator once
+and every later solve is a pair of triangular sweeps. What it cannot do is
+scale, because the factors fill in. Measured on the cylinder case, RK3, this
+machine:
+
+| grid | cells | `direct` | `mgcg` | `direct` factors | `mgcg` hierarchy |
+|---|---|---|---|---|---|
+| 256×128 | 33k | **8.7** ms/step | 49.7 ms/step | 31 MiB | 7 MiB |
+| 512×256 | 131k | **38** ms/step | 206 ms/step | 164 MiB | 28 MiB |
+| 1024×512 | 524k | **188** ms/step | 829 ms/step | 840 MiB | 113 MiB |
+| 1536×768 | 1.18M | **1130** ms/step | 1991 ms/step | 2106 MiB | 259 MiB |
+
+Read the two trends rather than any one row. `direct` is 5.7× faster at 256×128
+and only 1.8× faster at 1536×768, while its factors go from 4.7× the
+hierarchy's size to 8.1×. The factorisation itself follows the same curve —
+0.8 s against 0.06 s at the smallest grid, 12.2 s against 2.7 s at the largest.
+Both solvers agree to within `3e-12` in velocity after thirteen steps at every
+size.
+
+One grid further makes the point. At 2048×1024 — 2.1M cells — `mgcg` builds a
+nine-level hierarchy in 6.0 s, holds it in 464 MiB, and steps in 3.7 s at 11
+iterations per solve. Extrapolating the measured fill above (1.28, 1.64 and
+1.83 KiB per unknown) puts the direct factorisation for the same grid near
+4 GiB before SuperLU's working space, which does not fit alongside the fields
+on an 8 GiB machine. That row is not in the table because it was not run.
+
+`mgcg` is conjugate gradient preconditioned by an aggregation-multigrid V-cycle.
+Its cost is `O(N)` in both time and storage, and its iteration count does not
+depend on the grid. Measured against the Jacobi-preconditioned `cg`, to the
+same `1e-10` residual:
+
+| grid | `cg` (Jacobi) | `mgcg` |
+|---|---|---|
+| 64×64 | 283 it | 13 it |
+| 128×128 | 552 it | 13 it |
+| 256×256 | 1128 it | 13 it |
+| 512×512 | 2219 it | 13 it |
+
+The left column doubles every time the grid doubles; the right one does not
+move. That is what makes `mgcg` a different kind of solver rather than a
+faster one.
+
+**The honest summary: `direct` wins on time at every size where it fits, and
+`mgcg` is what you use when it stops fitting.** Sparse LU is very strong on 2D
+problems; a triangular solve makes one pass over its factors, while a V-cycle
+makes a dozen passes over the operator. Multigrid does not close that gap in 2D
+— it removes the memory wall instead, and the gap narrows as the wall gets
+closer.
+
+Two things to know before switching:
+
+- **An iterative solver is divergence-free to its tolerance, not to machine
+  precision**, and the default tolerance is looser than the `1e-11` the rest of
+  the codebase assumes. This is not specific to multigrid — `cg`, `sor` and
+  `jacobi` behave the same way — but it is the one thing that can surprise you
+  when switching. Tightening `poisson_tol` buys it back cheaply; at 512×256:
+
+  | solver | `poisson_tol` | ms/step | iterations | `max\|div\|` |
+  |---|---|---|---|---|
+  | `direct` | — | 38 | — | `2.8e-14` |
+  | `mgcg` | `1e-10` (default) | 201 | 11.0 | `6.6e-11` |
+  | `mgcg` | `1e-12` | 241 | 13.3 | `1.1e-12` |
+  | `mgcg` | `1e-14` | 287 | 16.0 | `3.9e-14` |
+
+  Machine-precision divergence costs 43% more time, not a different method.
+- **`mg_sweeps` is a real knob and 1 and 2 are close.** More smoothing per cycle
+  buys fewer cycles: at 512×256, `1` needs 11 iterations and `2` needs 8, and
+  the two come out within a per cent of each other on wall time. `3` is slower
+  than both. Leave it at 1 unless you measure otherwise on your own case.
+
+`multigrid` runs the V-cycles on their own, without CG. It converges at a factor
+of about 0.42 per cycle independent of the grid, needs roughly twice the cycles
+`mgcg` needs iterations, and exists mainly because it makes the hierarchy's
+behaviour visible. `mgcg` is the one to use.
 
 ### 4. Running the simulation
 
@@ -614,7 +697,8 @@ any file to launch a run. `python -m pycfd.main --help` prints the same list.
 |---|---|---|
 | `--time-scheme {euler,rk2,rk3}` | `rk3` | time integrator; `euler`/`rk2` are unstable for central advection |
 | `--advection {central,upwind}` | `central` | 2nd-order central, or blended upwind for stubborn high-Re runs |
-| `--pressure-solver {direct,cg,jacobi,sor}` | `direct` | linear solver for the pressure equation |
+| `--pressure-solver {direct,cg,jacobi,sor,multigrid,mgcg}` | `direct` | linear solver for the pressure equation; `mgcg` trades speed for O(N) memory on large grids |
+| `--mg-sweeps N` | 1 | smoothing sweeps per side of a multigrid V-cycle |
 | `--les` / `--no-les` | laminar | enable or force off the Smagorinsky sub-grid model |
 
 **Visualisation**

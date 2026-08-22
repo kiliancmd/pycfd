@@ -11,8 +11,8 @@ solver represents.
 python -m pytest pycfd/tests -q
 ```
 
-569 tests covering mesh geometry, obstacle construction from every supported
-source, all six boundary condition types, Poisson assembly and all four linear
+630 tests covering mesh geometry, obstacle construction from every supported
+source, all six boundary condition types, Poisson assembly and all six linear
 solvers, discrete conservation, the analytical benchmarks, dimensional
 bookkeeping, CLI plumbing, output provenance, and the export round-trips — plus
 6 full-fidelity benchmark regressions behind `--runslow`.
@@ -27,6 +27,14 @@ Notable invariants under test:
 - Taylor–Green kinetic energy decays at the analytical `exp(−4νt)` rate;
 - the Poisson operator is exactly symmetric with vanishing row sums, and the
   obstacle mask decouples solid cells;
+- every level of the multigrid hierarchy inherits those two properties —
+  coarse operators stay symmetric, still annihilate the constant, and still
+  leave a body as a hole — and the V-cycle preconditioner is checked for
+  symmetry by materialising it column by column, because an asymmetric one
+  costs CG its convergence guarantee without ever returning a wrong answer on
+  an easy problem;
+- the multigrid iteration count does not grow with the grid, which is the only
+  property that makes it worth having;
 - the analytical reference solutions are verified against the governing
   equations themselves, not taken on trust;
 - obstacle areas and centroids match closed-form values for circles, polygons,
@@ -201,7 +209,8 @@ pycfd/
 │   ├── mesh.py          Structured mesh; the MAC index convention lives here
 │   ├── fields.py        (u, v, p) container with ghost layers
 │   ├── boundary.py      BC classes, periodic wrapping, global mass balance
-│   ├── pressure.py      Poisson assembly + direct/CG/SOR/Jacobi solvers
+│   ├── pressure.py      Poisson assembly + the six linear solvers
+│   ├── multigrid.py     Aggregation multigrid: the V-cycle behind mgcg
 │   ├── solver.py        Projection method: advection, diffusion, projection
 │   ├── kernels.py       Optional fused Numba stencils
 │   └── timestepper.py   Adaptive dt, run loop, divergence detection
@@ -230,8 +239,8 @@ pycfd/
 │                        grid-study driver they share
 ├── tests/               mesh, geometry, boundary, pressure, solver, validation,
 │                        units, timeseries, shedding, gridstudy, richardson,
-│                        diagnose, multibody, cases, cli, provenance,
-│                        regression
+│                        diagnose, multibody, multigrid, cases, cli,
+│                        provenance, regression
 │                        + baselines.json
 ├── config.py            Dataclass configuration; every constant lives here
 ├── units.py             ISA atmosphere and the solver-unit <-> SI bridge
@@ -268,6 +277,15 @@ stencils. `visualization/` and `analysis/` never import from `core/`, and
   reproduces prescribed boundary values exactly. It is strictly the better
   choice here.
 - **Immersed-boundary drag is first-order accurate** — see the cylinder section.
+- **Multigrid buys memory, not speed, at the sizes this solver usually runs.**
+  `mgcg` is `O(N)` in time and storage where the direct factorisation is not,
+  but sparse LU is very strong on 2D problems and stays faster per step
+  wherever its factors fit — 5.7× at 256×128, narrowing to 1.8× at 1536×768.
+  The crossover is a memory wall rather than a time one, and `direct` remains
+  the default because of it. There is no line smoother, so a mesh whose cells
+  are far from square relies on semi-coarsening alone; that handles the
+  aspect ratios these cases produce (16:1 costs 8 iterations, not 165) but is
+  not the same as a method built for arbitrary anisotropy.
 - **No 3D or CAD import.** Geometry is a 2D outline, bitmap or predicate;
   there is no STL, STEP or DXF reader, and none is planned — a 2D silhouette is
   the entire model this solver can use.
