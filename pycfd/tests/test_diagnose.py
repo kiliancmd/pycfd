@@ -400,8 +400,8 @@ def test_a_geometry_reaches_the_study_instead_of_being_dropped(tmp_path, monkeyp
         ["--diagnose", "--case", "cylinder", "--geometry", "wing.csv",
          "--geometry-scale", "3.0"]
     )
-    assert study_kwargs(args)["geometry"] == "wing.csv"
-    assert study_kwargs(args)["geometry_scale"] == 3.0
+    assert study_kwargs(args)["geometry"] == ["wing.csv"]
+    assert study_kwargs(args)["geometry_scale"] == [3.0]
 
 
 def test_a_geometry_on_a_case_with_no_body_is_refused(tmp_path, capsys):

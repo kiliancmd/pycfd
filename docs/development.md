@@ -11,7 +11,7 @@ solver represents.
 python -m pytest pycfd/tests -q
 ```
 
-517 tests covering mesh geometry, obstacle construction from every supported
+569 tests covering mesh geometry, obstacle construction from every supported
 source, all six boundary condition types, Poisson assembly and all four linear
 solvers, discrete conservation, the analytical benchmarks, dimensional
 bookkeeping, CLI plumbing, output provenance, and the export round-trips — plus
@@ -62,7 +62,15 @@ Notable invariants under test:
 - the cavity and the channel accept a caller-supplied `steady_tol` and fall
   back to their own default when none is given — both cases used to pass it as
   an explicit keyword alongside `**overrides`, so any caller who supplied it
-  collided with the case's own default instead of overriding it.
+  collided with the case's own default instead of overriding it;
+- with several bodies in one domain, the per-body forces **sum to the total**
+  to round-off. That is not a tolerance check: each body's force is collected
+  from its own face set, the sets are asserted disjoint, and their union is
+  asserted to be the set the total comes from, so the arithmetic either closes
+  or it does not. The physics is pinned alongside it — a cylinder four
+  diameters behind another sees under half its drag, which is the entire reason
+  the split exists — and the geometries that would make the split meaningless
+  (bodies overlapping, or touching with no fluid between them) are refused.
 
 ---
 
@@ -201,7 +209,8 @@ pycfd/
 │   ├── incompressible.py  High-level Simulation driver
 │   └── turbulence.py      Smagorinsky SGS model
 ├── geometry/obstacles.py  Volume-fraction masks: primitives, polygons,
-│                          bitmaps, predicates
+│                          bitmaps, predicates; and ObstacleGroup, several
+│                          static bodies that each report their own force
 ├── analysis/
 │   ├── postprocess.py   Vorticity, stream function, forces, probes
 │   ├── validation.py    Analytical solutions, Ghia data, error norms
@@ -221,7 +230,8 @@ pycfd/
 │                        grid-study driver they share
 ├── tests/               mesh, geometry, boundary, pressure, solver, validation,
 │                        units, timeseries, shedding, gridstudy, richardson,
-│                        diagnose, cli, provenance, regression
+│                        diagnose, multibody, cases, cli, provenance,
+│                        regression
 │                        + baselines.json
 ├── config.py            Dataclass configuration; every constant lives here
 ├── units.py             ISA atmosphere and the solver-unit <-> SI bridge
@@ -261,6 +271,11 @@ stencils. `visualization/` and `analysis/` never import from `core/`, and
 - **No 3D or CAD import.** Geometry is a 2D outline, bitmap or predicate;
   there is no STL, STEP or DXF reader, and none is planned — a 2D silhouette is
   the entire model this solver can use.
+- **Several bodies may share a domain, but not move.** `ObstacleGroup` holds
+  any number of static bodies and reports a force on each; bodies that move
+  relative to one another need the forcing to be rebuilt every step and are a
+  separate piece of work. Bodies that touch are refused rather than fused,
+  since a per-body force needs fluid between them to be meaningful.
 - **Immersed geometry is resolved by a staircase.** A body must span at least
   ~16 cells for forces to be meaningful; thin bodies in large domains are
   expensive on a uniform grid, which the usage guide's example illustrates

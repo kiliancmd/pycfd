@@ -36,7 +36,8 @@ All four return an :class:`Obstacle`, which is what
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -384,3 +385,243 @@ def mask_from_function(mesh: StructuredMesh, inside,
             "check the coordinates it expects are in domain units"
         )
     return Obstacle(mask, frac, float(characteristic_length), name)
+
+
+# --------------------------------------------------------------------------- #
+# Several bodies at once
+# --------------------------------------------------------------------------- #
+def _disambiguate(members: tuple[Obstacle, ...]) -> tuple[Obstacle, ...]:
+    """Number bodies that share a name, so each can be reported separately.
+
+    A formation of identical bodies is loaded from one file, so identical names
+    are the *expected* case rather than a mistake -- and forces keyed by name
+    would silently collapse onto one entry, reporting one body's load and
+    losing the rest.  Repeated names become ``shield#1``, ``shield#2``; a name
+    used once is left alone.
+
+    A number that would itself collide -- two bodies called ``jet`` beside one
+    already called ``jet#1`` -- is bumped until it does not, since landing back
+    on a duplicate would lose a body in exactly the way this exists to prevent.
+
+    The renamed bodies are copies, so the caller's own objects keep the names
+    they were given.
+    """
+    counts = Counter(m.name for m in members)
+    if all(c == 1 for c in counts.values()):
+        return members
+
+    taken = {m.name for m in members if counts[m.name] == 1}
+    seen: dict[str, int] = {}
+    out = []
+    for m in members:
+        if counts[m.name] == 1:
+            out.append(m)
+            continue
+        k = seen.get(m.name, 0) + 1
+        while f"{m.name}#{k}" in taken:
+            k += 1
+        seen[m.name] = k
+        name = f"{m.name}#{k}"
+        taken.add(name)
+        out.append(replace(m, name=name))
+    return tuple(out)
+
+
+class ObstacleContactError(ValueError):
+    """Two bodies share solid cells, or share a face between them.
+
+    Both cases break the one thing a multi-body run is for -- saying what the
+    force on *each* body is -- so they are refused rather than silently summed
+    into a number that looks per-body and is not.
+    """
+
+
+@dataclass(frozen=True)
+class ObstacleGroup:
+    """Several static bodies sharing one domain.
+
+    Deliberately duck-types :class:`Obstacle`: it exposes the same ``mask``,
+    ``fraction``, ``characteristic_length``, ``name`` and ``area``, so anything
+    that accepts a single body accepts a group of them without knowing the
+    difference.  What it adds is ``members`` -- which is what lets the solver
+    report a separate force on each body instead of one total.
+
+    Why contact is refused
+    ----------------------
+    The reaction force on a body is collected from the faces that touch it, so
+    a face has to belong to exactly one body for the bookkeeping to close.  Two
+    bodies that *overlap* share solid cells; two that merely *touch* share the
+    face between them, and that face has no fluid on either side to carry a
+    load.  In both cases a per-body coefficient would be a number with no
+    physical referent, so :class:`ObstacleContactError` is raised instead.
+    Bodies meeting only at a corner are fine -- a corner is not a face.
+
+    Two bodies that really are in contact are, hydrodynamically, one body:
+    describe them with a single outline and read the single force back.
+    """
+
+    members: tuple[Obstacle, ...]
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        members = tuple(self.members)
+        if not members:
+            raise ValueError("an ObstacleGroup needs at least one body")
+        shapes = {m.mask.shape for m in members}
+        if len(shapes) != 1:
+            raise ValueError(
+                "every body must be built on the same mesh, got masks of shape "
+                + ", ".join(str(s) for s in sorted(shapes))
+            )
+
+        object.__setattr__(self, "members", _disambiguate(members))
+        if not self.name:
+            # A group that names its members is far easier to recognise in a
+            # log line or a figure title than one called "bodies"; past three
+            # the list stops being readable and a count is more use.
+            names = self.names
+            label = " + ".join(names) if len(names) <= 3 else f"{len(names)} bodies"
+            object.__setattr__(self, "name", label)
+        self._check_contact()
+
+    # ------------------------------------------------------------------ #
+    def _check_contact(self) -> None:
+        """Refuse overlapping bodies, and bodies sharing a face."""
+        labels = self.labels()
+
+        # Overlap: a cell claimed by two bodies.  Reported by naming the pair,
+        # since "the masks overlap" on its own does not say which to move.
+        for i, a in enumerate(self.members):
+            for b in self.members[i + 1:]:
+                shared = int(np.count_nonzero(a.mask & b.mask))
+                if shared:
+                    raise ObstacleContactError(
+                        f"bodies {a.name!r} and {b.name!r} overlap in {shared} "
+                        f"cell{'s' if shared != 1 else ''}; they are one body as "
+                        "far as the flow is concerned, so give them a single "
+                        "outline or move them apart"
+                    )
+
+        # Contact: a face with a different body on each side.
+        for axis in (0, 1):
+            lo = np.take(labels, np.arange(labels.shape[axis] - 1), axis=axis)
+            hi = np.take(labels, np.arange(1, labels.shape[axis]), axis=axis)
+            touching = (lo >= 0) & (hi >= 0) & (lo != hi)
+            if touching.any():
+                first = int(lo[touching][0]), int(hi[touching][0])
+                n = int(np.count_nonzero(touching))
+                raise ObstacleContactError(
+                    f"bodies {self.members[first[0]].name!r} and "
+                    f"{self.members[first[1]].name!r} touch along "
+                    f"{n} face{'s' if n != 1 else ''}; there is no fluid between "
+                    "them to carry a force, so a per-body coefficient would be "
+                    "meaningless -- merge them into one outline, or leave at "
+                    "least one fluid cell between them"
+                )
+
+    # ------------------------------------------------------------------ #
+    def labels(self) -> np.ndarray:
+        """``int`` array giving each cell's body index, ``-1`` where fluid.
+
+        Built with the *last* writer winning, which only matters for cells two
+        bodies both claim -- and those are refused on construction, so the
+        result is unambiguous by the time anyone can call this.
+        """
+        out = np.full(self.members[0].mask.shape, -1, dtype=int)
+        for k, body in enumerate(self.members):
+            out[body.mask] = k
+        return out
+
+    @property
+    def masks(self) -> tuple[np.ndarray, ...]:
+        """Each body's own cell mask, in ``members`` order."""
+        return tuple(m.mask for m in self.members)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(m.name for m in self.members)
+
+    @property
+    def mask(self) -> np.ndarray:
+        """Union of every body's cells -- what the solver holds at rest."""
+        out = np.zeros(self.members[0].mask.shape, dtype=bool)
+        for m in self.members:
+            out |= m.mask
+        return out
+
+    @property
+    def fraction(self) -> np.ndarray:
+        """Solid volume fraction summed over the bodies.
+
+        The sum is exact rather than an approximation because the bodies do not
+        share cells -- construction refused that -- so no cell is counted twice.
+        """
+        out = np.zeros(self.members[0].fraction.shape, dtype=float)
+        for m in self.members:
+            out += m.fraction
+        return out
+
+    @property
+    def characteristic_length(self) -> float:
+        """Reference length for the coefficients: the largest body's.
+
+        A group has no single natural length, and picking the wrong one scales
+        every coefficient by a constant.  The largest body is the one that sets
+        the scale of the flow the others sit in, which makes it the least
+        surprising default -- and ``--l-ref`` overrides it when the convention
+        is something else.
+        """
+        return max(m.characteristic_length for m in self.members)
+
+    @property
+    def area(self) -> float:
+        """Total solid area in cell units."""
+        return float(sum(m.area for m in self.members))
+
+    def blocked_span(self, dy: float) -> float:
+        """Worst-case extent of flow the bodies block, across the stream.
+
+        Blockage is what the walls feel, and for several bodies that is not any
+        one body's size.  Two bodies side by side block the sum of their spans;
+        two in tandem block only the larger.  Taking the most obstructed column
+        of cells gets both right, and reduces to the body's own extent when
+        there is only one.
+
+        Measured from the mask, so it is quantised to the grid -- which is the
+        honest number here, since the staircase is what the flow actually sees.
+        """
+        return float(self.mask.sum(axis=1).max()) * dy
+
+    def __len__(self) -> int:
+        return len(self.members)
+
+    def __iter__(self):
+        return iter(self.members)
+
+    def __repr__(self) -> str:
+        bodies = ", ".join(m.name for m in self.members)
+        return f"ObstacleGroup({len(self.members)} bodies: {bodies})"
+
+
+def as_obstacle_group(obstacle) -> ObstacleGroup | None:
+    """Normalise whatever a caller passed into a group, or ``None``.
+
+    Accepts a single :class:`Obstacle`, an :class:`ObstacleGroup`, or any
+    sequence of obstacles, so every entry point can take all three without
+    repeating the type analysis.
+    """
+    if obstacle is None:
+        return None
+    if isinstance(obstacle, ObstacleGroup):
+        return obstacle
+    if isinstance(obstacle, Obstacle):
+        return ObstacleGroup((obstacle,), name=obstacle.name)
+    members = tuple(obstacle)
+    if not members:
+        return None
+    if not all(isinstance(m, Obstacle) for m in members):
+        raise TypeError(
+            "an obstacle must be an Obstacle, an ObstacleGroup, or a sequence "
+            f"of Obstacles, got {type(obstacle).__name__}"
+        )
+    return ObstacleGroup(members)

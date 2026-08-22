@@ -393,6 +393,63 @@ python -m pycfd.main --case cylinder --re 100 --geometry aerofoil.csv --geometry
 configuration the cylinder benchmark uses, which is the usual external-flow
 setup. It accepts `--geometry-scale` and `--geometry-rotate` for vertex files.
 
+### Several bodies at once
+
+Repeat `--geometry` to put more than one body in the same domain — formation
+aerodynamics, a store beside a pylon, a wake-interference study. Each body then
+needs its own `--geometry-at X,Y`:
+
+```bash
+python -m pycfd.main --case cylinder --re 40 \
+    --geometry pycfd/geometry_import/shield.csv --geometry-at 4,4 \
+    --geometry pycfd/geometry_import/shield.csv --geometry-at 9,4 \
+    --nx 128 --ny 64 --t-end 25
+```
+
+There is no default arrangement, because there is no defensible one: a guessed
+formation does not fail, it quietly simulates something nobody asked for. So
+placement is required as soon as there is a second body.
+
+**Each body reports its own force.** A total would average away the only thing
+a multi-body run is for. The report adds one entry per body, and the case's own
+checks list them side by side:
+
+```
+  cd_shield#1                  2.07333
+  cd_shield#2                  0.448144
+    [PASS] force resolved per body: shield#1 Cd = 2.073, shield#2 Cd = 0.448
+           (all against L = 1.95)
+```
+
+Two identical bodies loaded from one file would collide in that listing, so
+repeated names are numbered `#1`, `#2` — otherwise one body's load would
+silently overwrite another's.
+
+Every coefficient is normalised by the *same* `l_ref`, which is what makes them
+comparable; dividing each body by its own length would produce numbers that
+cannot be set beside one another. With no `--l-ref`, that shared length is the
+largest body's.
+
+**Bodies may not touch.** Two that overlap, or that merely share a cell face,
+are refused rather than run:
+
+```
+bodies 'fore' and 'aft' touch along 8 faces; there is no fluid between them to
+carry a force, so a per-body coefficient would be meaningless -- merge them
+into one outline, or leave at least one fluid cell between them
+```
+
+The force on a body is collected from the faces touching it, so each face has
+to belong to exactly one body for the split to add up. Bodies meeting only at a
+corner are fine — a corner is not a face. Two that genuinely are in contact are
+one body as far as the flow is concerned: give them a single outline.
+
+**Blockage counts all of them.** It is measured from the mask — the most
+obstructed column of cells — rather than from any one body's nominal length.
+Two bodies abreast block the sum of their spans; two in tandem block only one.
+For a circular cylinder this is exactly the diameter, so the benchmark number
+is unchanged.
+
 The downstream boundary can be chosen at the same time with `--outlet-type` and
 `--p-ref` — see [`PRESSURE_OUTLET`](#pressure_outlet--anchoring-the-pressure-instead-of-the-velocity)
 above for what the two conditions differ in. For anything the flags cannot
@@ -546,9 +603,10 @@ any file to launch a run. `python -m pycfd.main --help` prints the same list.
 
 | flag | default | meaning |
 |---|---|---|
-| `--geometry FILE` | none | 2D body: vertex file (`.csv`/`.txt`/`.dat`) or bitmap (`.png`/`.jpg`) |
-| `--geometry-scale S` | `1.0` | scale a vertex outline about its centroid |
-| `--geometry-rotate DEG` | `0.0` | rotate a vertex outline, degrees anticlockwise |
+| `--geometry FILE` | none | 2D body: vertex file (`.csv`/`.txt`/`.dat`) or bitmap (`.png`/`.jpg`). **Repeatable** — see [several bodies at once](#several-bodies-at-once) |
+| `--geometry-at X,Y` | ¼ along | centre the outline here; required once per body when several are given |
+| `--geometry-scale S` | `1.0` | scale a vertex outline about its centroid; once for all bodies or once each |
+| `--geometry-rotate DEG` | `0.0` | rotate a vertex outline, degrees anticlockwise; once for all bodies or once each |
 
 **Numerics**
 

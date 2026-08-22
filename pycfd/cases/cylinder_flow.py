@@ -29,6 +29,7 @@ Run with::
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +38,7 @@ from ..analysis.postprocess import Probe, force_coefficients, strouhal_number
 from ..analysis.shedding import detect_shedding
 from ..analysis.timeseries import time_average
 from ..config import BCKind, BCSpec, SimulationConfig
-from ..geometry.obstacles import circle_mask
+from ..geometry.obstacles import as_obstacle_group, circle_mask
 from ..physics.incompressible import Simulation
 from ..units import INCOMPRESSIBLE_MACH_LIMIT, Scaling
 
@@ -191,11 +192,14 @@ def build(re: float | None = None, nx: int = 256, ny: int = 128,
     cy = domain_height / 2.0
     if obstacle is None:
         obstacle = circle_mask(mesh, (cylinder_x, cy), DIAMETER / 2.0, name="cylinder")
-    elif obstacle.mask.shape != mesh.shape:
-        raise ValueError(
-            f"the supplied obstacle was built on a {obstacle.mask.shape} grid but "
-            f"the simulation mesh is {mesh.shape}; build both from the same mesh"
-        )
+    else:
+        obstacle = as_obstacle_group(obstacle)
+        if obstacle.mask.shape != mesh.shape:
+            raise ValueError(
+                f"the supplied obstacle was built on a {obstacle.mask.shape} grid "
+                f"but the simulation mesh is {mesh.shape}; build both from the "
+                "same mesh"
+            )
 
     # Reynolds number and force coefficients follow the body's own length scale
     # unless the caller names a different convention.
@@ -245,12 +249,54 @@ def build(re: float | None = None, nx: int = 256, ny: int = 128,
     return Simulation(cfg, obstacle=obstacle, u_init=U_INF, v_init=v_init)
 
 
+def file_tag(name: str) -> str:
+    """Reduce a body's display name to something safe to put in a filename.
+
+    A group names its members -- ``"shield#1 + shield#2"`` -- which reads well
+    in a report and badly in a shell.  The same applies to a single body loaded
+    from a file whose name has a space in it.  The display name is left alone;
+    only the path is folded.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "body"
+
+
+#: Image suffixes that are read as a bitmap silhouette rather than a vertex list.
+BITMAP_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff")
+
+
+def _load_body(path, mesh, scale, rotate_deg, center, threshold, invert):
+    """One obstacle from one file, placed on ``mesh``."""
+    from ..geometry.obstacles import (
+        load_polygon,
+        mask_from_image,
+        polygon_mask,
+        transform_polygon,
+    )
+
+    path = Path(path)
+    if path.suffix.lower() in BITMAP_SUFFIXES:
+        if center is not None:
+            raise ValueError(
+                f"{path.name} is a bitmap, which is stretched over the whole "
+                "domain and carries its own placement; --geometry-at applies "
+                "to vertex outlines only"
+            )
+        return mask_from_image(mesh, path, threshold=threshold, invert=invert,
+                               name=path.stem)
+    verts = load_polygon(path)
+    if center is None:
+        center = (0.25 * mesh.lx, 0.5 * mesh.ly)
+    return polygon_mask(
+        mesh, transform_polygon(verts, scale, center, rotate_deg), name=path.stem
+    )
+
+
 def build_from_geometry(path, re: float | None = None, nx: int = 256, ny: int = 128,
                         scale: float = 1.0, rotate_deg: float = 0.0,
                         center: tuple[float, float] | None = None,
                         threshold: float = 0.5, invert: bool = False,
                         **kwargs) -> Simulation:
-    """External flow past a custom 2D body loaded from a file.
+    """External flow past one or more custom 2D bodies loaded from files.
 
     ``path`` may be a vertex list (``.csv``/``.txt``/``.dat``) or a bitmap
     silhouette (``.png``/``.jpg``).  Outlines are scaled, rotated and placed at
@@ -258,34 +304,56 @@ def build_from_geometry(path, re: float | None = None, nx: int = 256, ny: int = 
     the rest for the wake.  Bitmaps are stretched across the whole domain, so
     they carry their own placement and ignore the transform arguments.
 
+    Passing a *sequence* of paths puts several bodies in the same domain, each
+    reporting its own force.  ``scale``, ``rotate_deg`` and ``center`` then
+    accept either one value for all of them or one per body, and every body
+    needs a ``center`` -- there is no defensible default arrangement, and a
+    wrong one produces a plausible simulation of the wrong thing.
+
     ``l_ref``, ``wind_speed`` and ``altitude`` pass through to :func:`build`;
     they are the flags that matter most here, since a body from a file is
     exactly the case where the default reference length is a guess.
     """
-    from ..geometry.obstacles import (
-        load_polygon,
-        mask_from_image,
-        polygon_mask,
-        transform_polygon,
-    )
+    from ..geometry.obstacles import ObstacleGroup
     from ..core.mesh import StructuredMesh
 
-    path = Path(path)
+    single = isinstance(path, (str, Path))
+    paths = [path] if single else list(path)
+    if not paths:
+        raise ValueError("build_from_geometry needs at least one geometry file")
+
+    def per_body(value, what):
+        if single or not isinstance(value, (list, tuple)):
+            return [value] * len(paths)
+        if len(value) == 1:
+            return list(value) * len(paths)
+        if len(value) != len(paths):
+            raise ValueError(
+                f"{what} was given {len(value)} values for {len(paths)} bodies; "
+                "give one for all of them or one each"
+            )
+        return list(value)
+
+    scales = per_body(scale, "scale")
+    rotations = per_body(rotate_deg, "rotate_deg")
+    centers = per_body(center, "center")
+    if len(paths) > 1 and any(c is None for c in centers):
+        raise ValueError(
+            "each body needs its own center when several are given; placing "
+            "them automatically would be a guess"
+        )
+
     domain_length = kwargs.get("domain_length", DOMAIN_LENGTH)
     domain_height = kwargs.get("domain_height", DOMAIN_HEIGHT)
     mesh = StructuredMesh(nx, ny, domain_length, domain_height)
 
-    if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"):
-        obstacle = mask_from_image(mesh, path, threshold=threshold, invert=invert,
-                                   name=path.stem)
-    else:
-        verts = load_polygon(path)
-        if center is None:
-            center = (0.25 * domain_length, 0.5 * domain_height)
-        obstacle = polygon_mask(
-            mesh, transform_polygon(verts, scale, center, rotate_deg), name=path.stem
-        )
-    log.info("loaded %s: %s", path.name, obstacle)
+    bodies = [
+        _load_body(pth, mesh, sc, rot, ctr, threshold, invert)
+        for pth, sc, rot, ctr in zip(paths, scales, rotations, centers)
+    ]
+    obstacle = bodies[0] if len(bodies) == 1 else ObstacleGroup(tuple(bodies))
+    log.info("loaded %d %s: %s", len(bodies),
+             "body" if len(bodies) == 1 else "bodies", obstacle)
     return build(re=re, nx=nx, ny=ny, obstacle=obstacle, **kwargs)
 
 
@@ -309,6 +377,7 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
         dt: float = 0.02, outdir: str | Path = "results/cylinder",
         make_plots: bool = True, progress: bool = False, geometry=None,
         geometry_scale: float = 1.0, geometry_rotate: float = 0.0,
+        geometry_at=None,
         outlet_type: str | None = None, p_ref: float | None = None,
         l_ref: float | None = None, wind_speed: float | None = None,
         altitude: float | None = None, transient: float | None = None,
@@ -335,9 +404,10 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
     from . import CaseResult
 
     scales = dict(l_ref=l_ref, wind_speed=wind_speed, altitude=altitude)
-    if geometry is not None:
+    if geometry:
         sim = build_from_geometry(geometry, re=re, nx=nx, ny=ny,
                                   scale=geometry_scale, rotate_deg=geometry_rotate,
+                                  center=geometry_at,
                                   t_end=t_end, dt=dt, outlet_type=outlet_type,
                                   p_ref=p_ref, **scales, **overrides)
     else:
@@ -379,6 +449,14 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
     # the number of times the callback fired.
     cd_average = time_average(t, cd, transient_fraction)
 
+    # What blocks the channel is measured from the mask rather than taken from
+    # the body's nominal length, because the two are not the same number for a
+    # pointed or concave outline -- and because a second body must never be
+    # able to *lower* the reported blockage, which is what happens the moment
+    # one body's length stands in for what all of them obstruct.  For a
+    # circular cylinder the two agree exactly, so the benchmark is untouched.
+    blocked = sim.bodies.blocked_span(sim.mesh.dy)
+
     metrics: dict[str, float] = {
         "cd_mean": cd_average.mean,
         "cd_uncertainty": cd_average.uncertainty,
@@ -386,9 +464,14 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
         "cl_rms": float(np.sqrt(np.mean(cl[settled] ** 2))) if settled.any() else float("nan"),
         # The body's own extent across the flow: what the grid has to resolve
         # and what blocks the channel, whatever the coefficients are divided by.
+        # The two part company for anything but a convex single body: the grid
+        # has to resolve the largest span, while what blocks the channel is
+        # whatever the most obstructed column of cells adds up to -- for two
+        # bodies abreast that is both of them, and for two in tandem neither
+        # body's neighbour adds anything.
         "characteristic_length": sim.obstacle.characteristic_length,
         "cells_across_body": sim.obstacle.characteristic_length / sim.mesh.dy,
-        "blockage_ratio": sim.obstacle.characteristic_length / sim.mesh.ly,
+        "blockage_ratio": blocked / sim.mesh.ly,
         # The length Re, Cd and St were actually formed with -- the same number
         # unless --l-ref asked for a different convention.
         "reference_length": reference_length,
@@ -406,6 +489,15 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
         "max_divergence": sim.solver.max_divergence(sim.fields),
     }
 
+    if len(sim.bodies) > 1:
+        # The reason for running several bodies at once is that they differ --
+        # a body in another's wake sees a different load, and a total hides it.
+        # Reported at the final step rather than time-averaged, since the
+        # per-body history is not recorded during the run.
+        for body, (body_cd, body_cl) in sim.force_coefficients_by_body().items():
+            metrics[f"cd_{body}"] = body_cd
+            metrics[f"cl_{body}"] = body_cl
+
     if wind_speed is not None:
         # What the run is a simulation *of*, recorded next to what it measured.
         scaling = flight_scaling(wind_speed, altitude)
@@ -417,7 +509,7 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
 
     checks: list[tuple[str, bool, str]] = []
     key = int(round(re))
-    if geometry is not None:
+    if geometry:
         # A custom body has no published reference; report the measurement and
         # check only that the run produced a usable force signal.
         checks.append((
@@ -425,6 +517,13 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
             f"Cd = {metrics['cd_mean']:.3f}, Cl_rms = {metrics['cl_rms']:.3f} "
             f"(no published reference for this geometry)",
         ))
+        if len(sim.bodies) > 1:
+            per_body = sim.force_coefficients_by_body()
+            checks.append((
+                "force resolved per body", True,
+                ", ".join(f"{n} Cd = {c[0]:.3f}" for n, c in per_body.items())
+                + f" (all against L = {reference_length:g})",
+            ))
     elif key in REFERENCE_CD:
         lo, hi = REFERENCE_CD[key]
         cd_mean = metrics["cd_mean"]
@@ -484,7 +583,7 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
 
         outdir = Path(outdir)
         body = sim.obstacle.name
-        tag = f"{body}_Re{re:g}_{nx}x{ny}"
+        tag = f"{file_tag(body)}_Re{re:g}_{nx}x{ny}"
         p1 = outdir / f"{tag}_fields.png"
         sp.four_panel_figure(
             sim.fields, solid=sim.solid_mask,
@@ -498,5 +597,5 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
         )
         outputs += [p1, p2]
 
-    label = sim.obstacle.name if geometry is not None else "Cylinder"
+    label = sim.obstacle.name if geometry else "Cylinder"
     return CaseResult(f"{label} (Re={re:g}, {nx}x{ny})", sim, metrics, outputs, checks)

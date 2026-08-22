@@ -38,6 +38,7 @@ exposes the single-substep operator that the Runge--Kutta stages compose.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -89,6 +90,12 @@ class ProjectionSolver:
         Optional pre-built mesh; created from ``config`` when omitted.
     obstacle:
         Optional boolean ``(nx, ny)`` mask, ``True`` inside a solid body.
+    bodies:
+        Optional per-body masks whose union is ``obstacle``.  Supplying them
+        makes the solver report the reaction force on each body separately in
+        :attr:`body_force_reactions`, which is the whole point of putting more
+        than one body in a domain.  Omitting them costs nothing and reports the
+        total only.
     """
 
     def __init__(
@@ -96,6 +103,7 @@ class ProjectionSolver:
         config: SimulationConfig,
         mesh: StructuredMesh | None = None,
         obstacle: np.ndarray | None = None,
+        bodies: Sequence[np.ndarray] | None = None,
     ) -> None:
         if config.solver_type is SolverType.SIMPLE:
             raise NotImplementedError(
@@ -124,6 +132,18 @@ class ProjectionSolver:
                 )
         self.has_obstacle = bool(self.solid.any())
 
+        # Per-body masks are kept only when they would tell us something the
+        # union does not -- with a single body the two are the same array and
+        # the extra reduction on every substep would buy nothing.
+        self.body_masks: tuple[np.ndarray, ...] = ()
+        if bodies is not None and len(bodies) > 1:
+            self.body_masks = tuple(np.asarray(b, dtype=bool) for b in bodies)
+            for k, b in enumerate(self.body_masks):
+                if b.shape != (nx, ny):
+                    raise ValueError(
+                        f"body {k} mask must have shape {(nx, ny)}, got {b.shape}"
+                    )
+
         self._build_slices()
 
         #: Walls holding the pressure fixed; non-empty makes the operator
@@ -147,6 +167,10 @@ class ProjectionSolver:
 
         #: Immersed-boundary reaction force from the most recent substep, (fx, fy).
         self.body_force_reaction = (0.0, 0.0)
+        #: The same force resolved per body, empty unless several were supplied.
+        self.body_force_reactions: tuple[tuple[float, float], ...] = tuple(
+            (0.0, 0.0) for _ in self.body_masks
+        )
         self._blend = 0.0    # donor-cell blending factor in force for this substep
 
         # The fused kernel covers the constant-viscosity case only; the
@@ -203,6 +227,19 @@ class ProjectionSolver:
         else:
             self.u_face_solid = None
             self.v_face_solid = None
+
+        # One face set per body, so the momentum removed at each face can be
+        # charged to the body that removed it.  The sets are disjoint and their
+        # union is the total: a face touching two bodies would land in two of
+        # them, which is exactly the geometry ObstacleGroup refuses.
+        self.u_face_body = tuple(
+            _face_solid_mask(b, u_lo, u_hi, axis=0, periodic=self.periodic_x)
+            for b in self.body_masks
+        )
+        self.v_face_body = tuple(
+            _face_solid_mask(b, v_lo, v_hi, axis=1, periodic=self.periodic_y)
+            for b in self.body_masks
+        )
 
     # ------------------------------------------------------------------ #
     # Initialisation
@@ -436,6 +473,19 @@ class ProjectionSolver:
             else:
                 prev = self.body_force_reaction
                 self.body_force_reaction = (prev[0] + fx, prev[1] + fy)
+            if self.body_masks:
+                per_body = tuple(
+                    (float(u_faces[um].sum()) * cell_area / dt,
+                     float(v_faces[vm].sum()) * cell_area / dt)
+                    for um, vm in zip(self.u_face_body, self.v_face_body)
+                )
+                if reset:
+                    self.body_force_reactions = per_body
+                else:
+                    self.body_force_reactions = tuple(
+                        (a[0] + b[0], a[1] + b[1])
+                        for a, b in zip(self.body_force_reactions, per_body)
+                    )
         u_faces[self.u_face_solid] = 0.0
         v_faces[self.v_face_solid] = 0.0
 

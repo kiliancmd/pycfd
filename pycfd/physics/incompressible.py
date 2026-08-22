@@ -8,6 +8,7 @@ callers never have to remember the order in which the pieces must be wired up.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
 
@@ -20,7 +21,7 @@ from ..core.fields import FlowField
 from ..core.mesh import StructuredMesh
 from ..core.solver import ProjectionSolver
 from ..core.timestepper import SimulationResult, TimeStepper
-from ..geometry.obstacles import Obstacle
+from ..geometry.obstacles import Obstacle, ObstacleGroup, as_obstacle_group
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +34,11 @@ class Simulation:
     config:
         Validated configuration.
     obstacle:
-        Optional immersed body.
+        Optional immersed body: one :class:`~pycfd.geometry.obstacles.Obstacle`,
+        an :class:`~pycfd.geometry.obstacles.ObstacleGroup`, or any sequence of
+        obstacles.  Several bodies are held at rest exactly as one is; what
+        changes is that each reports its own force -- see
+        :meth:`force_coefficients_by_body`.
     u_init, v_init:
         Optional initial condition on the physical face layouts,
         ``(nx+1, ny)`` and ``(nx, ny+1)``.
@@ -42,15 +47,22 @@ class Simulation:
     def __init__(
         self,
         config: SimulationConfig,
-        obstacle: Obstacle | None = None,
+        obstacle: Obstacle | ObstacleGroup | Sequence[Obstacle] | None = None,
         u_init: np.ndarray | float | None = None,
         v_init: np.ndarray | float | None = None,
     ) -> None:
         self.config = config
         self.mesh = StructuredMesh.from_config(config)
-        self.obstacle = obstacle
+        #: Every body in the domain, or ``None``.  A single obstacle is wrapped
+        #: in a one-member group so the rest of the class has one shape to
+        #: handle; :attr:`obstacle` still hands back what was passed in.
+        self.bodies = as_obstacle_group(obstacle)
+        self.obstacle = obstacle if isinstance(obstacle, (Obstacle, ObstacleGroup)) \
+            else self.bodies
         self.solver = ProjectionSolver(
-            config, self.mesh, obstacle.mask if obstacle is not None else None
+            config, self.mesh,
+            self.bodies.mask if self.bodies is not None else None,
+            bodies=self.bodies.masks if self.bodies is not None else None,
         )
         self.stepper = TimeStepper(self.solver, config)
         self.fields = self.solver.initialize(u_init, v_init)
@@ -60,8 +72,10 @@ class Simulation:
 
     # ------------------------------------------------------------------ #
     @classmethod
-    def from_checkpoint(cls, path: str | Path,
-                        obstacle: Obstacle | None = None) -> "Simulation":
+    def from_checkpoint(
+        cls, path: str | Path,
+        obstacle: Obstacle | ObstacleGroup | Sequence[Obstacle] | None = None,
+    ) -> "Simulation":
         """Rebuild a simulation from a checkpoint and restore its state."""
         fields, config = export_mod.load_checkpoint(path)
         sim = cls(config, obstacle)
@@ -106,8 +120,8 @@ class Simulation:
     # ------------------------------------------------------------------ #
     @property
     def solid_mask(self) -> np.ndarray | None:
-        """Obstacle mask, or ``None`` for an unobstructed domain."""
-        return self.obstacle.mask if self.obstacle is not None else None
+        """Union of every body's cells, or ``None`` for an unobstructed domain."""
+        return self.bodies.mask if self.bodies is not None else None
 
     def force_coefficients(self) -> tuple[float, float]:
         """``(Cd, Cl)`` from the immersed-boundary reaction force.
@@ -120,12 +134,39 @@ class Simulation:
         length.  A case that puts a body in the flow sets ``l_ref`` from that
         body (or from whatever convention the caller named instead).
         """
-        if self.obstacle is None:
+        if self.bodies is None:
             return 0.0, 0.0
         from ..analysis.postprocess import force_coefficients
         return force_coefficients(
             self.solver.body_force_reaction, self.config.u_ref, self.config.l_ref,
         )
+
+    def force_coefficients_by_body(self) -> dict[str, tuple[float, float]]:
+        """``{name: (Cd, Cl)}`` for each body, in the order they were given.
+
+        The reason to put two bodies in a domain is almost always to find out
+        how they differ -- a trailing body in a leading one's wake sees a
+        different drag, and a total would hide exactly that.  Each body's
+        coefficient comes from the momentum removed at the faces touching *it*,
+        so the values sum to :meth:`force_coefficients` when they share a
+        reference length, which they do: all of them are normalised by
+        ``config.l_ref``, the same scale the Reynolds number uses.  Comparing
+        two bodies against one common length is the point; normalising each by
+        its own would make the numbers incomparable.
+
+        A single body gives one entry, so a caller need not special-case it.
+        """
+        if self.bodies is None:
+            return {}
+        from ..analysis.postprocess import force_coefficients
+
+        reactions = self.solver.body_force_reactions
+        if not reactions:                      # one body: the total *is* its force
+            reactions = (self.solver.body_force_reaction,)
+        return {
+            name: force_coefficients(force, self.config.u_ref, self.config.l_ref)
+            for name, force in zip(self.bodies.names, reactions)
+        }
 
     def outlet_pressure_deviation(self) -> float:
         """Largest departure of a pressure-outlet face from its ``p_ref``.
@@ -178,9 +219,12 @@ class Simulation:
         from ..analysis.provenance import provenance_record
 
         facts = {k: v for k, v in self.diagnostics().items()}
-        if self.obstacle is not None:
-            facts["obstacle"] = self.obstacle.name
-            facts["characteristic_length"] = self.obstacle.characteristic_length
+        if self.bodies is not None:
+            facts["obstacle"] = self.bodies.name if len(self.bodies) > 1 \
+                else self.bodies.names[0]
+            facts["characteristic_length"] = self.bodies.characteristic_length
+            if len(self.bodies) > 1:
+                facts["bodies"] = list(self.bodies.names)
         facts.update(extra)
         return provenance_record(self.config, extra=facts)
 

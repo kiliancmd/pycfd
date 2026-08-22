@@ -130,14 +130,24 @@ def build_parser() -> argparse.ArgumentParser:
                            "raise this when it says no")
 
     geom = p.add_argument_group("custom geometry (external-flow / cylinder case)")
-    geom.add_argument("--geometry", default=None, metavar="FILE",
+    geom.add_argument("--geometry", action="append", default=None, metavar="FILE",
                       help="2D body to place in the flow: a vertex file "
                            "(.csv/.txt/.dat, two columns x y) or a bitmap "
-                           "silhouette (.png/.jpg, dark = solid)")
-    geom.add_argument("--geometry-scale", type=float, default=1.0,
-                      help="scale factor applied to a vertex outline")
-    geom.add_argument("--geometry-rotate", type=float, default=0.0, metavar="DEG",
-                      help="rotation applied to a vertex outline, in degrees")
+                           "silhouette (.png/.jpg, dark = solid). Repeat it to "
+                           "put several bodies in one domain, each of which "
+                           "then reports its own Cd and Cl")
+    geom.add_argument("--geometry-at", action="append", default=None, metavar="X,Y",
+                      help="where to centre the outline, in domain units. "
+                           "Required once per --geometry when more than one is "
+                           "given, since there is no sensible way to guess a "
+                           "formation")
+    geom.add_argument("--geometry-scale", action="append", type=float, default=None,
+                      help="scale factor applied to a vertex outline; give it "
+                           "once for all bodies or once per body")
+    geom.add_argument("--geometry-rotate", action="append", type=float, default=None,
+                      metavar="DEG",
+                      help="rotation applied to a vertex outline, in degrees; "
+                           "give it once for all bodies or once per body")
 
     num = p.add_argument_group("numerics")
     num.add_argument("--time-scheme", default=None,
@@ -303,6 +313,87 @@ def case_kwargs(args: argparse.Namespace) -> dict:
     return kwargs
 
 
+def parse_placement(text: str) -> tuple[float, float]:
+    """``"4,3.5"`` -> ``(4.0, 3.5)``, the centre a body is placed at."""
+    parts = [t for t in text.replace(",", " ").split() if t]
+    if len(parts) != 2:
+        raise ValueError(
+            f"--geometry-at takes a centre as X,Y in domain units, got {text!r}"
+        )
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        raise ValueError(
+            f"--geometry-at takes two numbers as X,Y, got {text!r}"
+        ) from None
+
+
+def _spread(values: list | None, n: int, flag: str, default):
+    """Broadcast a per-body option: one value for all, or one each."""
+    if not values:
+        return [default] * n
+    if len(values) == 1:
+        return list(values) * n
+    if len(values) != n:
+        raise ValueError(
+            f"{flag} was given {len(values)} times for {n} bodies; give it once "
+            "to apply to all of them, or once per --geometry"
+        )
+    return list(values)
+
+
+def geometry_spec(args: argparse.Namespace) -> dict:
+    """Resolve the ``--geometry`` flags into one entry per body.
+
+    Placement is *required* once there is more than one body. Any automatic
+    arrangement would be a guess, and a wrong guess here does not fail --- it
+    silently simulates a formation nobody asked for, or two bodies fused into
+    one.
+    """
+    paths = args.geometry or []
+    n = len(paths)
+    centers = [parse_placement(t) for t in (args.geometry_at or [])]
+    if centers and len(centers) != n:
+        raise ValueError(
+            f"--geometry-at was given {len(centers)} times for {n} "
+            f"{'body' if n == 1 else 'bodies'}; give one per --geometry"
+        )
+    if n > 1 and not centers:
+        raise ValueError(
+            f"{n} bodies were given but no --geometry-at; each one needs a "
+            "centre, e.g. --geometry a.csv --geometry-at 4,4 "
+            "--geometry b.csv --geometry-at 9,4"
+        )
+    return dict(
+        geometry=paths,
+        geometry_at=centers or [None] * n,
+        geometry_scale=_spread(args.geometry_scale, n, "--geometry-scale", 1.0),
+        geometry_rotate=_spread(args.geometry_rotate, n, "--geometry-rotate", 0.0),
+    )
+
+
+def check_orphan_geometry_flags(args: argparse.Namespace) -> None:
+    """Refuse the placement flags when there is no body for them to place.
+
+    They would otherwise be dropped in silence, and the run that came back
+    would look like the one that was asked for.
+    """
+    if args.geometry:
+        return
+    orphans = [
+        flag for flag, value in (
+            ("--geometry-at", args.geometry_at),
+            ("--geometry-scale", args.geometry_scale),
+            ("--geometry-rotate", args.geometry_rotate),
+        ) if value
+    ]
+    if orphans:
+        raise ValueError(
+            f"{', '.join(orphans)} describes how to place a body, but no "
+            "--geometry was given"
+        )
+
+
 def geometry_kwargs(args: argparse.Namespace) -> dict:
     """Forward ``--geometry`` to the cases that can place a body in the flow.
 
@@ -310,15 +401,14 @@ def geometry_kwargs(args: argparse.Namespace) -> dict:
     a circular cylinder when it was handed an aircraft silhouette is the worst
     kind of wrong answer: it is a complete, plausible one.
     """
-    if args.geometry is None:
+    if not args.geometry:
         return {}
     if args.case != "cylinder":
         raise ValueError(
             f"--geometry places a body in an external flow and applies to "
             f"--case cylinder, not '{args.case}'"
         )
-    return dict(geometry=args.geometry, geometry_scale=args.geometry_scale,
-                geometry_rotate=args.geometry_rotate)
+    return geometry_spec(args)
 
 
 def study_kwargs(args: argparse.Namespace) -> dict:
@@ -403,15 +493,17 @@ def run_live(args: argparse.Namespace) -> int:
     if args.resume:
         from .physics.incompressible import Simulation
         sim = Simulation.from_checkpoint(args.resume)
-    elif args.geometry is not None:
+    elif args.geometry:
         if args.case != "cylinder":
             raise ValueError(
                 f"--geometry places a body in an external flow and applies to "
                 f"--case cylinder, not '{args.case}'"
             )
+        spec = geometry_spec(args)
         sim = module.build_from_geometry(
-            args.geometry, scale=args.geometry_scale,
-            rotate_deg=args.geometry_rotate, **kwargs,
+            spec["geometry"], scale=spec["geometry_scale"],
+            rotate_deg=spec["geometry_rotate"], center=spec["geometry_at"],
+            **kwargs,
         )
     else:
         sim = module.build(**kwargs)
@@ -575,6 +667,7 @@ def _run(args: argparse.Namespace) -> int:
 
     # Validate the export scaling before a long run rather than after it.
     export_scaling(args)
+    check_orphan_geometry_flags(args)
 
     if not args.live:
         # Static figures must not need a display.
