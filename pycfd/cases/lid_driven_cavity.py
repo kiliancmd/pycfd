@@ -67,12 +67,13 @@ def build(re: float = 100.0, nx: int = 128, ny: int = 128,
     # convergence once already.  ``setdefault`` keeps ``--les`` working.
     overrides.setdefault("use_les", False)
     overrides.setdefault("name", f"cavity_Re{re:g}")
+    overrides.setdefault("steady_tol", STEADY_TOLERANCE)
 
     cfg = SimulationConfig(
         nx=nx, ny=ny, lx=1.0, ly=1.0,
         re=re, u_ref=LID_SPEED, l_ref=1.0,
         dt=dt, t_end=default_end_time(re) if t_end is None else t_end,
-        cfl_max=cfl_max, steady_tol=STEADY_TOLERANCE,
+        cfl_max=cfl_max,
         boundary_config={
             "left": BCSpec(BCKind.NO_SLIP),
             "right": BCSpec(BCKind.NO_SLIP),

@@ -96,6 +96,7 @@ def build(re: float = 10.0, nx: int = 32, ny: int = 64, t_end: float | None = No
     # convergence once already.  ``setdefault`` keeps ``--les`` working.
     overrides.setdefault("use_les", False)
     overrides.setdefault("name", f"channel_{mode}_Re{re:g}")
+    overrides.setdefault("steady_tol", STEADY_TOLERANCE)
 
     nu = U_MAX * CHANNEL_HEIGHT / re
     # The transient decays on the viscous time scale h^2 / nu.
@@ -127,7 +128,7 @@ def build(re: float = 10.0, nx: int = 32, ny: int = 64, t_end: float | None = No
         nx=nx, ny=ny, lx=length, ly=CHANNEL_HEIGHT,
         re=re, u_ref=U_MAX, l_ref=CHANNEL_HEIGHT,
         dt=dt, t_end=default_t_end if t_end is None else t_end,
-        cfl_max=cfl_max, steady_tol=STEADY_TOLERANCE,
+        cfl_max=cfl_max,
         body_force=force, boundary_config=override_outlet(bcs, outlet_type, p_ref),
         **overrides,
     )

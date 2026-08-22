@@ -11,7 +11,7 @@ solver represents.
 python -m pytest pycfd/tests -q
 ```
 
-513 tests covering mesh geometry, obstacle construction from every supported
+517 tests covering mesh geometry, obstacle construction from every supported
 source, all six boundary condition types, Poisson assembly and all four linear
 solvers, discrete conservation, the analytical benchmarks, dimensional
 bookkeeping, CLI plumbing, output provenance, and the export round-trips — plus
@@ -58,7 +58,11 @@ Notable invariants under test:
   **not** by the grid — tightening the tolerance 100× tightens it 100×, while
   refining leaves it at 1.01e-7 %. That is why it is not one of the channel's
   convergence metrics, and the test asserts both halves so the exclusion cannot
-  be undone by accident.
+  be undone by accident;
+- the cavity and the channel accept a caller-supplied `steady_tol` and fall
+  back to their own default when none is given — both cases used to pass it as
+  an explicit keyword alongside `**overrides`, so any caller who supplied it
+  collided with the case's own default instead of overriding it.
 
 ---
 
