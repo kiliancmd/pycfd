@@ -11,7 +11,7 @@ solver represents.
 python -m pytest pycfd/tests -q
 ```
 
-449 tests covering mesh geometry, obstacle construction from every supported
+513 tests covering mesh geometry, obstacle construction from every supported
 source, all six boundary condition types, Poisson assembly and all four linear
 solvers, discrete conservation, the analytical benchmarks, dimensional
 bookkeeping, CLI plumbing, output provenance, and the export round-trips — plus
@@ -46,7 +46,19 @@ Notable invariants under test:
 - shedding detection **refuses** white noise, a linear drift, an exponential
   decay and a record spanning too few periods. Each is a signal
   `strouhal_number()` answers with a confident frequency, so the negative cases
-  are the ones under test.
+  are the ones under test;
+- the sanity pass reads an error that fell 75% under refinement as a
+  second-order scheme working, and one that has *settled* as a solver that
+  stopped converging — the two readings are opposite for an error and a measured
+  quantity, and asking the wrong question inverts the verdict. Its remedies are
+  checked arithmetically rather than textually: the domain height it suggests is
+  asserted to bring blockage under the threshold, and the resolution it suggests
+  to put 16 cells across the body;
+- the channel's centreline error is pinned as being set by `steady_tol` and
+  **not** by the grid — tightening the tolerance 100× tightens it 100×, while
+  refining leaves it at 1.01e-7 %. That is why it is not one of the channel's
+  convergence metrics, and the test asserts both halves so the exclusion cannot
+  be undone by accident.
 
 ---
 
@@ -194,6 +206,8 @@ pycfd/
 │   ├── shedding.py      Is a wake periodic, or does it merely have a peak?
 │   ├── richardson.py    Richardson extrapolation + GCI, and the regime check
 │   │                    that decides whether either is worth reporting
+│   ├── diagnose.py      The end-to-end sanity pass: every question above at
+│   │                    once, one verdict each, worst first
 │   ├── provenance.py    What produced a given output file
 │   └── export.py        VTK / CSV / NPZ checkpoints
 ├── visualization/
@@ -203,7 +217,7 @@ pycfd/
 │                        grid-study driver they share
 ├── tests/               mesh, geometry, boundary, pressure, solver, validation,
 │                        units, timeseries, shedding, gridstudy, richardson,
-│                        cli, provenance, regression + baselines.json
+│                        diagnose, cli, provenance, regression
 │                        + baselines.json
 ├── config.py            Dataclass configuration; every constant lives here
 ├── units.py             ISA atmosphere and the solver-unit <-> SI bridge

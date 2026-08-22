@@ -14,6 +14,7 @@ import pytest
 
 from pycfd.cases import (
     DEFAULT_RESOLUTIONS,
+    MIN_CONVERGENCE_ORDER,
     NOISE_FLOOR,
     SETTLED_TOLERANCE,
     GridStudy,
@@ -142,9 +143,56 @@ def test_passed_requires_every_metric_to_settle():
 
 
 def test_the_report_says_which_metric_is_still_moving():
-    text = study([1.0, 0.5, 0.25]).report()
+    text = study([1.0, 0.5, 0.25], kind="quantity").report()
     assert "STILL MOVING" in text and "m" in text
     assert "refine further" in text
+
+
+# --------------------------------------------------------------------------- #
+# What refinement is supposed to do depends on what the metric is
+# --------------------------------------------------------------------------- #
+def test_an_error_converges_by_moving_not_by_settling():
+    """Halving the error on each doubling is a scheme working, not one stuck.
+
+    Judged by the settled test -- which is the right question for a measured
+    quantity -- a first-order solver converging perfectly moves 50% per grid and
+    reads as a failure. Asking the wrong one of the two inverts the answer.
+    """
+    healthy = study([1.0, 0.5, 0.25])
+    assert healthy.converging("m") and not healthy.settled("m")
+    assert healthy.passed
+    assert "converging at order 1.00" in healthy.report()
+
+
+def test_an_error_that_has_settled_has_stopped_converging():
+    """The same reading that means success for a quantity means failure here."""
+    stalled = study([1.0, 0.5, 0.499])
+    assert stalled.settled("m") and not stalled.converging("m")
+    assert not stalled.passed
+    assert "NOT CONVERGING" in stalled.report()
+
+
+def test_an_error_that_grows_under_refinement_is_not_converging():
+    assert not study([0.25, 0.5, 0.9]).converging("m")
+
+
+def test_an_error_driven_to_zero_is_converged():
+    """Zero is the destination; there is no order left to fit to it."""
+    assert study([1e-3, 1e-6, 0.0]).converging("m")
+
+
+def test_a_quantity_converges_by_settling():
+    """And it gets no order, so the error branch cannot be reached for one."""
+    quiet = study([1.0, 0.5, 0.5], kind="quantity")
+    assert quiet.converging("m") and quiet.settled("m")
+    assert math.isnan(quiet.observed_order("m"))
+
+
+def test_an_error_creeping_downward_too_slowly_is_not_converging():
+    """Half of first order: below that a sequence is decreasing, not converging."""
+    creep = study([1.0, 0.95, 0.90])
+    assert creep.observed_order("m") < MIN_CONVERGENCE_ORDER
+    assert not creep.converging("m")
 
 
 def test_the_report_names_the_resolutions_it_used():

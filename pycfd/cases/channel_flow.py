@@ -43,11 +43,22 @@ CHANNEL_LENGTH = 2.0
 
 STEADY_TOLERANCE = 1.0e-9
 
-#: What a grid study on this case should watch.  Both are errors against the
-#: analytical Poiseuille parabola, so an observed order is meaningful.
+#: What a grid study on this case should watch: the shape error against the
+#: analytical Poiseuille parabola, which is a genuine discretisation error and
+#: converges at order 2.
+#:
+#: ``centerline_error_pct`` is deliberately *not* here, although it looks like
+#: the obvious second entry.  It measures the peak against a fixed target, and
+#: what actually sets it is :data:`STEADY_TOLERANCE` -- the point at which the
+#: time integration is allowed to stop -- rather than the grid.  Measured, at
+#: nx = 16: ``steady_tol`` 1e-7 / 1e-9 / 1e-11 gives 1.01e-5 / 1.01e-7 / 1.01e-9
+#: per cent, exactly proportional, while doubling the grid at fixed tolerance
+#: moves it from 1.009e-7 to 1.013e-7 -- not at all.  Refinement has nothing to
+#: act on, so a study that tracked it would report the channel as failing to
+#: converge for a reason that has nothing to do with convergence.  The number is
+#: still measured, reported and checked below; it just is not a grid metric.
 CONVERGENCE_METRICS = {
     "profile_L2_relative": "error",
-    "centerline_error_pct": "error",
 }
 
 #: Relative L2 agreement with the analytical parabola that counts as a pass.

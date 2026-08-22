@@ -413,7 +413,7 @@ cylinder-diameter convention. `--l-ref` names a different one, in the geometry
 file's own units:
 
 ```bash
-python -m pycfd.main --case cylinder --geometry f22_side_profile.csv --l-ref 18.8 --re 1e6
+python -m pycfd.main --case cylinder --geometry pycfd/geometry_import/f22_side_profile.csv --l-ref 18.8 --re 1e6
 ```
 
 It changes what `Re`, `Cd`, `Cl` and `St` are formed with — and therefore
@@ -428,7 +428,7 @@ conditions.** `Re = V·L/nu` with `nu` from the International Standard
 Atmosphere, treating the geometry's length unit as the metre:
 
 ```bash
-python -m pycfd.main --case cylinder --geometry f22_side_profile.csv \
+python -m pycfd.main --case cylinder --geometry pycfd/geometry_import/f22_side_profile.csv \
     --l-ref 18.8 --wind-speed 70 --altitude 3000
 ```
 
@@ -449,7 +449,7 @@ records what it was a simulation *of*.
 way out, so nothing has to be converted by hand afterwards:
 
 ```bash
-python -m pycfd.main --case cylinder --geometry f22_side_profile.csv \
+python -m pycfd.main --case cylinder --geometry pycfd/geometry_import/f22_side_profile.csv \
     --l-ref 18.8 --wind-speed 70 --altitude 3000 \
     --export-csv --export-vtk --checkpoint --rescale-to 70 --name f22
 ```
@@ -509,7 +509,8 @@ any file to launch a run. `python -m pycfd.main --help` prints the same list.
 | `--case {cavity,channel,cylinder,taylor_green}` | `cavity` | which benchmark to run |
 | `--list-cases` | — | print the available cases and exit |
 | `--convergence` | — | run a grid-refinement study on `--case` and exit (defaults to `taylor_green`) |
-| `--resolutions N,N,N` | `16,32,64,128` (taylor_green), `32,64,128` | cell counts for the study, coarsest first |
+| `--diagnose` | — | run the end-to-end sanity pass on `--case` and exit (defaults to `cylinder`); mutually exclusive with `--convergence` |
+| `--resolutions N,N,N` | `16,32,64,128` (taylor_green), `32,64,128` (other studies), half and three-quarters of the case's own grid (`--diagnose`) | cell counts for the study, coarsest first |
 
 **Grid and physics**
 
@@ -711,9 +712,22 @@ A metric declared as a **quantity** rather than an error gets no observed
 order. That is deliberate: fitting one to a sequence with nothing to be wrong
 against is exactly how a study that never reached its asymptotic regime gets
 extrapolated as though it had. What it gets instead is the relative change
-between successive grids, and a verdict — *settled* when the two finest grids
-agree to within 2%, **STILL MOVING** otherwise. The exit code follows: `0` when
-every tracked metric settled, `1` when one did not.
+between successive grids.
+
+The verdict then depends on which of the two the metric is, because refinement
+is supposed to do **opposite** things to them:
+
+| kind | converging looks like | the verdict line |
+|---|---|---|
+| quantity | the number stops moving — the finest two grids agree to within 2% | *settled* / **STILL MOVING** |
+| error | the number keeps moving — shrinking, at a plausible observed order (≥ 0.5) | *converging at order p* / **NOT CONVERGING** |
+
+Asking the wrong one inverts the answer. Second-order convergence moves an
+error by 75% per doubling; judged by "did it stop moving?", a solver working
+perfectly reads as a failure — and an error that *has* settled is one that has
+stopped converging, which is the reading that actually deserves attention. The
+exit code follows the verdict: `0` when every tracked metric behaved, `1` when
+one did not.
 
 The case's own aspect ratio is preserved as the grid refines, so a 2:1 channel
 stays 2:1 rather than being squared into a different problem. Each case
@@ -781,12 +795,168 @@ if estimate.trustworthy:
     print(estimate.extrapolated, estimate.band())
 ```
 
+#### The end-to-end sanity pass
+
+`--diagnose` asks every question above at once, plus the ones about the setup
+itself, and reports a verdict per question:
+
+```bash
+python -m pycfd.main --diagnose                    # the cylinder, ~90 s
+python -m pycfd.main --diagnose --case cavity
+```
+
+It runs the case on a **coarse and a medium grid, both below the one the case
+would otherwise use** — half and three-quarters resolution — because refining
+is the only way to find out whether a number has converged and the cheapest
+place to look is underneath the grid you were going to run anyway. Everything
+else about the configuration is exactly what you passed, so the diagnosis is of
+the run you actually intended.
+
+```
+=== cylinder diagnosis: grids 128, 192 (the case's own default is 256) ===
+
+  [ WARN ] convergence of cl_rms
+           moved 21.42% between N=128 and N=192
+           -> still moving at more than 2%; refine past N=192 before quoting it; a third grid would say where it is heading
+
+  [ WARN ] blockage
+           the body spans 12.5% of the cross-stream extent
+           -> above 10% the walls accelerate the flow past the body and bias Cd upward by several per cent -- more than the spread between published unbounded values. --domain-height 20 would bring it under 5%
+
+  [ WARN ] body resolution
+           the body spans 8.0 -> 12.0 cells across the study's grids
+           -> a staircase immersed boundary needs about 16 cells before forces are quantitative -- roughly N=256 here
+
+  [  OK  ] continuity
+           max|div u| = 3.4e-15, 5.4e-15 across the grids
+
+  [  OK  ] convergence of cd_mean
+           moved 0.68% between N=128 and N=192
+
+  [  OK  ] case validation
+           all 3 of the case's own checks passed at N=192
+
+  0 failed, 3 warned, 3 passed
+  usable, with the caveats above
+```
+
+The worst finding is printed first, because that is what you ran this for.
+Read the shipped cylinder's three warnings as what they are — the case's own
+docstring already says its drag is an engineering estimate, and these are the
+reasons why.
+
+**The checks.** Each one is skipped in silence when the case does not report
+what it needs, which is what lets one list serve a closed cavity and an
+aircraft silhouette alike:
+
+| check | asks | `warn` | `fail` |
+|---|---|---|---|
+| stability | did every grid finish? | — | the solver blew up |
+| continuity | how much divergence survived the projection? | > `1e-8` | > `1e-6` |
+| convergence of *m* | did each refined metric behave? | still moving, not falling, or `\|R\| ≥ 1` | — |
+| blockage | how much of the cross-stream extent does the body fill? | ≥ 5% | — |
+| body resolution | how many cells span the body? | < 16 | < 4 |
+| compressibility | is `M` inside the incompressible limit? | > 0.3 | — |
+| case validation | did the case's own checks pass on the finest grid? | any failed | — |
+
+The shipped cylinder is a well-behaved setup. A custom body dropped into the
+same domain at a real flight speed is not, and every check has something to say:
+
+```bash
+python -m pycfd.main --diagnose --case cylinder \
+    --geometry pycfd/geometry_import/f22_side_profile.csv \
+    --l-ref 18.8 --wind-speed 180 --altitude 8000 --resolutions 64,96 --t-end 4
+```
+
+```
+=== cylinder diagnosis: grids 64, 96 (the case's own default is 256) ===
+
+  [ WARN ] convergence of cl_rms
+           moved 73.49% between N=64 and N=96
+           -> still moving at more than 2%; refine past N=96 before quoting it; a third grid would say where it is heading
+
+  [ WARN ] blockage
+           the body spans 32.2% of the cross-stream extent
+           -> above 10% the walls accelerate the flow past the body and bias Cd upward by several per cent -- more than the spread between published unbounded values. --domain-height 51.5596 would bring it under 5%
+
+  [ WARN ] body resolution
+           the body spans 10.3 -> 15.5 cells across the study's grids
+           -> a staircase immersed boundary needs about 16 cells before forces are quantitative -- roughly N=100 here
+
+  [ WARN ] compressibility
+           M = 0.584 at the stated conditions
+           -> this solver has no density equation at all, so above M = 0.3 the result approximates a different flow rather than the same one slightly less well
+
+  [ WARN ] case validation
+           1 of 2 of the case's own checks passed at N=96; force average is stationary: the two halves of the averaging window differ by -3.7 standard errors; raise --transient above 0.5 or run longer
+           -> N=96 is a diagnostic grid, below the one this case runs at, so a check that only just failed here may pass at full resolution -- but a non-stationary average or an undetected wake will not fix itself
+
+  [  OK  ] continuity
+           max|div u| = 1.3e-15, 2.3e-15 across the grids
+
+  [  OK  ] convergence of cd_mean
+           moved 0.91% between N=64 and N=96
+
+  0 failed, 5 warned, 2 passed
+  usable, with the caveats above
+```
+
+Five findings, none of which is wrong: an 18.8 m aircraft in a domain sized for
+a unit cylinder really does block a third of the channel, 180 m/s at 8 km really
+is M = 0.58 in a solver with no density equation, and a 4-second record really
+has not settled — that last one is the honest consequence of the `--t-end 4`
+that made this example cheap to run. `cd_mean`, meanwhile, has already stopped
+moving at 0.91%. **Warnings are the caller's judgement to make, not the tool's**
+— which is why none of these is a failure.
+
+**The exit code carries the worst verdict**, which makes this usable as a gate:
+
+| code | meaning |
+|---|---|
+| `0` | nothing flagged |
+| `1` | usable, but somebody has a judgement to make |
+| `2` | the setup will not support a quantitative answer |
+
+Remedies are arithmetic, not hand-waving: the domain height it suggests really
+does bring blockage under 5%, and the resolution it suggests really does put 16
+cells across the body — on the shipped cylinder that works out to `N=256`,
+which is the grid the case already chose.
+
+**What it deliberately does not do is shorten the run.** A truncated record is
+a different flow, not a cheaper look at the same one, and the force coefficient
+it reports would answer a question nobody asked. The saving comes from the grid
+alone. Pass `--t-end` yourself for a faster screen, and read the stationarity
+verdict knowing that is what you asked for.
+
+**Two grids or three.** The default pair says whether a number moved. Naming a
+third with `--resolutions` buys Richardson extrapolation on every refined
+metric, which replaces *refine past N=192* with the limit the sequence is
+heading for and a GCI band around it — and, when the triplet turns out not to be
+converging at all, says that instead of extrapolating anyway:
+
+```bash
+python -m pycfd.main --diagnose --resolutions 96,128,192
+```
+
+The same pass is available directly, if you want the findings rather than the
+printout:
+
+```python
+from pycfd.analysis.diagnose import diagnose
+
+d = diagnose("cylinder", geometry="pycfd/geometry_import/f22_side_profile.csv", l_ref=18.8)
+print(d.level, d.usable)
+for finding in d.findings:
+    if finding.level != "ok":
+        print(finding.name, "--", finding.detail, "|", finding.advice)
+```
+
 #### Worked recipes
 
 Custom body from a vertex file, in a larger domain, with the wake anchored:
 
 ```bash
-python -m pycfd.main --case cylinder --geometry shield.csv \
+python -m pycfd.main --case cylinder --geometry pycfd/geometry_import/shield.csv \
     --re 100 --nx 384 --ny 192 --domain-length 24 --domain-height 12 \
     --geometry-scale 1.0 --geometry-rotate 0 \
     --outlet-type pressure_outlet --p-ref 0 \
@@ -798,7 +968,7 @@ A body sized in metres, at a real speed and altitude, reported against the
 aircraft-length convention rather than the body's height:
 
 ```bash
-python -m pycfd.main --case cylinder --geometry f22_side_profile.csv \
+python -m pycfd.main --case cylinder --geometry pycfd/geometry_import/f22_side_profile.csv \
     --l-ref 18.8 --wind-speed 70 --altitude 3000 \
     --nx 320 --ny 240 --domain-length 80 --domain-height 60 \
     --t-end 40 --name f22_70ms_3km --checkpoint
@@ -812,14 +982,14 @@ later.
 Watch it develop instead, then keep going from where it stopped:
 
 ```bash
-python -m pycfd.main --case cylinder --geometry shield.csv --re 100 --live --display vorticity
+python -m pycfd.main --case cylinder --geometry pycfd/geometry_import/shield.csv --re 100 --live --display vorticity
 python -m pycfd.main --resume results/shield_run1.npz --t-end 240
 ```
 
 A quick low-resolution sanity pass before committing to a long run:
 
 ```bash
-python -m pycfd.main --case cylinder --geometry shield.csv --re 100 \
+python -m pycfd.main --case cylinder --geometry pycfd/geometry_import/shield.csv --re 100 \
     --nx 96 --ny 48 --t-end 5 --no-plots
 ```
 

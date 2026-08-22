@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import BCKind, BCSpec
+from ..core.timestepper import DivergenceError
 from ..physics.incompressible import Simulation
 
 log = logging.getLogger(__name__)
@@ -162,6 +163,11 @@ SETTLED_TOLERANCE = 0.02
 #: refuses to converge.
 NOISE_FLOOR = 1.0e-9
 
+#: Observed order below which an error metric is not really converging.  Half
+#: of first order: a sequence decreasing more slowly than that is decreasing
+#: rather than converging, and refining it further will not buy an answer.
+MIN_CONVERGENCE_ORDER = 0.5
+
 
 def parse_resolutions(text: str) -> tuple[int, ...]:
     """Parse ``"64,128,256"`` into validated, increasing cell counts."""
@@ -202,6 +208,18 @@ def case_aspect(case: str) -> float | None:
     return ny / nx
 
 
+def case_resolution(case: str) -> int | None:
+    """The case's own default ``nx``, or ``None`` if it does not take one.
+
+    What a diagnostic study measures itself against: the grid the case would
+    have used had nobody asked for a study, so a pass run below it says
+    something about the run the user was actually going to do.
+    """
+    params = inspect.signature(load_case(case).run).parameters
+    nx = params["nx"].default if "nx" in params else None
+    return nx if isinstance(nx, int) else None
+
+
 @dataclass
 class GridStudy:
     """How a case's reported metrics behave under grid refinement.
@@ -217,6 +235,12 @@ class GridStudy:
     resolutions: list[int]
     values: dict[str, list[float]]
     kinds: dict[str, str]
+    #: The full outcome of each run, in the same order as ``resolutions``.
+    #: ``values`` holds only the metrics being refined against; everything else
+    #: a run reported -- its divergence, its blockage, its own pass/fail checks
+    #: -- lives here, which is what lets :mod:`pycfd.analysis.diagnose` ask
+    #: questions the study itself was not set up to answer.
+    results: list[CaseResult] = field(default_factory=list)
 
     def changes(self, metric: str) -> list[float]:
         """Relative change between each successive pair of grids.
@@ -254,6 +278,42 @@ class GridStudy:
         changes = self.changes(metric)
         return bool(changes) and math.isfinite(changes[-1]) and changes[-1] <= tol
 
+    def converging(self, metric: str, tol: float = SETTLED_TOLERANCE) -> bool:
+        """Whether ``metric`` is doing what refinement is supposed to do to it.
+
+        Which question that is depends on what the metric *is*, and asking the
+        wrong one inverts the answer.  A measured quantity converges by ceasing
+        to move, so :meth:`settled` is the whole test.  An error converges by
+        moving -- shrinking, at a rate the scheme's order predicts -- so an
+        error that has settled has *stopped* converging, and reporting it as
+        healthy would flag a second-order solver working perfectly as a failure.
+        """
+        if self.kinds.get(metric) != "error":
+            return self.settled(metric, tol)
+
+        series = self.values[metric]
+        if len(series) < 2:
+            return False
+        if abs(series[-1]) <= NOISE_FLOOR:
+            return True                   # exact to round-off; nothing left to do
+        if abs(series[-1]) >= abs(series[-2]):
+            return False                  # refining made it worse, or no better
+        order = self.observed_order(metric)
+        return math.isfinite(order) and order >= MIN_CONVERGENCE_ORDER
+
+    def verdict(self, metric: str) -> str:
+        """One line saying whether ``metric`` behaved, in its own terms."""
+        healthy = self.converging(metric)
+        if self.kinds.get(metric) == "error":
+            order = self.observed_order(metric)
+            rate = f" at order {order:.2f}" if math.isfinite(order) else ""
+            return (f"converging{rate}" if healthy else
+                    "NOT CONVERGING: refining is not reducing the error")
+        return (f"settled at {SETTLED_TOLERANCE * 100:g}% between the two "
+                f"finest grids" if healthy else
+                f"STILL MOVING at more than {SETTLED_TOLERANCE * 100:g}% "
+                f"between the two finest grids")
+
     def richardson(self, metric: str):
         """Richardson/GCI estimate for ``metric``, or ``None`` under three grids.
 
@@ -269,8 +329,8 @@ class GridStudy:
 
     @property
     def passed(self) -> bool:
-        """True when every tracked metric has settled."""
-        return all(self.settled(m) for m in self.values)
+        """True when every tracked metric behaved under refinement."""
+        return all(self.converging(m) for m in self.values)
 
     def table(self) -> str:
         """One block per metric: value at each grid, change, and order."""
@@ -291,9 +351,7 @@ class GridStudy:
                 # themselves, which assumes the error is a clean C*h^p. Where
                 # they disagree, that assumption is what is failing.
                 lines.append(f"    order from the error magnitudes: {order:.3f}")
-            verdict = "settled" if self.settled(metric) else "STILL MOVING"
-            lines.append(f"    {verdict} at {SETTLED_TOLERANCE * 100:g}% "
-                         f"between the two finest grids")
+            lines.append(f"    {self.verdict(metric)}")
             estimate = self.richardson(metric)
             if estimate is not None:
                 lines.append(estimate.report())
@@ -317,9 +375,8 @@ class GridStudy:
             lines.append("  two grids show whether a number moved; a third "
                          "would show whether it is going anywhere")
         lines.append(
-            "  every tracked metric has settled" if self.passed else
-            "  at least one metric is still moving: refine further before "
-            "trusting it"
+            "  every tracked metric behaved under refinement" if self.passed else
+            "  at least one metric did not: refine further before trusting it"
         )
         return "\n".join(lines)
 
@@ -346,10 +403,19 @@ def grid_study(case: str, resolutions=DEFAULT_RESOLUTIONS,
 
     aspect = case_aspect(case)
     values: dict[str, list[float]] = {m: [] for m in kinds}
+    results: list[CaseResult] = []
     for n in resolutions:
         extra = {} if aspect is None else {"ny": max(4, round(n * aspect))}
-        result = module.run(nx=n, make_plots=False, progress=progress,
-                            **extra, **kwargs)
+        try:
+            result = module.run(nx=n, make_plots=False, progress=progress,
+                                **extra, **kwargs)
+        except DivergenceError as exc:
+            # Which grid blew up is the whole content of the message: a study
+            # that fails only on its coarsest grid is a different problem from
+            # one that fails everywhere, and the bare exception says neither.
+            raise DivergenceError(
+                f"the '{case}' case diverged at N={n}: {exc}"
+            ) from exc
         for metric in kinds:
             if metric not in result.metrics:
                 raise ValueError(
@@ -357,7 +423,8 @@ def grid_study(case: str, resolutions=DEFAULT_RESOLUTIONS,
                     f"but did not report it at N={n}"
                 )
             values[metric].append(float(result.metrics[metric]))
+        results.append(result)
         log.info("N=%d: %s", n,
                  "  ".join(f"{m}={values[m][-1]:.6g}" for m in kinds))
 
-    return GridStudy(case, [int(n) for n in resolutions], values, kinds)
+    return GridStudy(case, [int(n) for n in resolutions], values, kinds, results)

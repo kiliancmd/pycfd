@@ -43,24 +43,37 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Left unset so that --convergence can keep meaning the Taylor-Green study,
-    # which is the one with an exact solution and the one the published
-    # second-order number comes from.  Resolved in main().
+    # Left unset so that --convergence and --diagnose can each keep meaning the
+    # case they are actually about: Taylor-Green is the one with an exact
+    # solution, and the cylinder the one with a body to resolve and confine.
+    # Resolved in main().
     p.add_argument("--case", default=None,
                    choices=sorted(available_cases()),
-                   help="benchmark case to run (default: cavity, or "
-                        "taylor_green with --convergence)")
+                   help="benchmark case to run (default: cavity; taylor_green "
+                        "with --convergence, cylinder with --diagnose)")
     p.add_argument("--list-cases", action="store_true",
                    help="list the available benchmark cases and exit")
-    p.add_argument("--convergence", action="store_true",
-                   help="run a grid-refinement study on --case and exit. "
-                        "taylor_green measures the true error against its exact "
-                        "solution; every other case tracks the metrics it "
-                        "declares and reports whether they have stopped moving")
+    study = p.add_mutually_exclusive_group()
+    study.add_argument("--convergence", action="store_true",
+                       help="run a grid-refinement study on --case and exit. "
+                            "taylor_green measures the true error against its "
+                            "exact solution; every other case tracks the metrics "
+                            "it declares and reports whether they have stopped "
+                            "moving")
+    study.add_argument("--diagnose", action="store_true",
+                       help="run --case on a coarse/medium pair of grids below "
+                            "its own default and report a verdict per question: "
+                            "continuity, whether the force coefficients have "
+                            "settled, blockage, how many cells span the body, "
+                            "and the case's own checks. Exits 0 clean, 1 with "
+                            "warnings, 2 when the setup cannot support an answer")
     p.add_argument("--resolutions", default=None, metavar="N,N,N",
-                   help="cell counts for --convergence, coarsest first "
-                        "(default: 16,32,64,128 for taylor_green, 32,64,128 "
-                        "otherwise). The case's own aspect ratio is preserved")
+                   help="cell counts for --convergence or --diagnose, coarsest "
+                        "first (default: 16,32,64,128 for taylor_green, "
+                        "32,64,128 for another --convergence, and half and "
+                        "three-quarters of the case's own grid for --diagnose). "
+                        "The case's own aspect ratio is preserved, and a third "
+                        "grid buys Richardson extrapolation")
 
     grid = p.add_argument_group("grid and physics")
     grid.add_argument("--re", type=float, default=None, help="Reynolds number")
@@ -290,6 +303,39 @@ def case_kwargs(args: argparse.Namespace) -> dict:
     return kwargs
 
 
+def geometry_kwargs(args: argparse.Namespace) -> dict:
+    """Forward ``--geometry`` to the cases that can place a body in the flow.
+
+    Shared by every path that runs a case, because a study that quietly studies
+    a circular cylinder when it was handed an aircraft silhouette is the worst
+    kind of wrong answer: it is a complete, plausible one.
+    """
+    if args.geometry is None:
+        return {}
+    if args.case != "cylinder":
+        raise ValueError(
+            f"--geometry places a body in an external flow and applies to "
+            f"--case cylinder, not '{args.case}'"
+        )
+    return dict(geometry=args.geometry, geometry_scale=args.geometry_scale,
+                geometry_rotate=args.geometry_rotate)
+
+
+def study_kwargs(args: argparse.Namespace) -> dict:
+    """The case overrides a grid study should carry.
+
+    ``nx``/``ny`` are dropped because the study sets them, and ``name`` because
+    every grid would otherwise write under the same label.
+    """
+    kwargs = {k: v for k, v in case_kwargs(args).items()
+              if k not in ("nx", "ny", "name")}
+    if args.case != "channel":
+        kwargs.pop("mode", None)          # only the channel has a mode variant
+    kwargs.update(case_specific_kwargs(args))
+    kwargs.update(geometry_kwargs(args))
+    return kwargs
+
+
 def export_scaling(args: argparse.Namespace):
     """The :class:`~pycfd.units.Scaling` ``--rescale-to`` asks for, or ``None``.
 
@@ -409,16 +455,14 @@ def run_convergence_study(args: argparse.Namespace) -> int:
 
     resolutions = (None if args.resolutions is None
                    else parse_resolutions(args.resolutions))
-    study_kwargs = {k: v for k, v in case_kwargs(args).items()
-                    if k not in ("nx", "ny", "name")}
 
     if args.case == "taylor_green":
-        study_kwargs.pop("mode", None)
+        overrides = study_kwargs(args)
         result = load_case("taylor_green").run_convergence(
             resolutions=resolutions or TAYLOR_GREEN_RESOLUTIONS,
             outdir=Path(args.outdir) / "convergence",
             make_plots=not args.no_plots, progress=args.progress,
-            **{k: v for k, v in study_kwargs.items() if k in ("re", "t_end")},
+            **{k: v for k, v in overrides.items() if k in ("re", "t_end")},
         )
         print()
         print(result.report())
@@ -427,14 +471,33 @@ def run_convergence_study(args: argparse.Namespace) -> int:
             print("\n".join("    " + line for line in table.table().splitlines()))
         return EXIT_OK if result.passed else EXIT_VALIDATION_FAILED
 
-    if args.case != "channel":
-        study_kwargs.pop("mode", None)
-    study_kwargs.update(case_specific_kwargs(args))
     study = grid_study(args.case, resolutions or DEFAULT_RESOLUTIONS,
-                       progress=args.progress, **study_kwargs)
+                       progress=args.progress, **study_kwargs(args))
     print()
     print(study.report())
     return EXIT_OK if study.passed else EXIT_VALIDATION_FAILED
+
+
+def run_diagnosis(args: argparse.Namespace) -> int:
+    """Run the end-to-end sanity pass on ``--case`` and report every verdict.
+
+    The exit code carries the worst one, so this is usable as a gate: nothing
+    flagged exits 0, a warning exits 1 -- the run is usable but somebody has a
+    judgement to make -- and a failure exits 2, which is this CLI's existing
+    "could not produce an answer".
+    """
+    from .analysis.diagnose import FAIL, OK, diagnose
+    from .cases import parse_resolutions
+
+    resolutions = (None if args.resolutions is None
+                   else parse_resolutions(args.resolutions))
+    result = diagnose(args.case, resolutions, progress=args.progress,
+                      **study_kwargs(args))
+    print()
+    print(result.report())
+    if result.level == OK:
+        return EXIT_OK
+    return EXIT_ERROR if result.level == FAIL else EXIT_VALIDATION_FAILED
 
 
 def run_resume(args: argparse.Namespace) -> int:
@@ -484,7 +547,8 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point.  Returns a process exit code."""
     args = build_parser().parse_args(argv)
     if args.case is None:
-        args.case = "taylor_green" if args.convergence else "cavity"
+        args.case = ("taylor_green" if args.convergence else
+                     "cylinder" if args.diagnose else "cavity")
     configure_logging(args.verbose, args.quiet)
     try:
         return _run(args)
@@ -520,6 +584,9 @@ def _run(args: argparse.Namespace) -> int:
     if args.convergence:
         return run_convergence_study(args)
 
+    if args.diagnose:
+        return run_diagnosis(args)
+
     if args.live:
         return run_live(args)
 
@@ -531,15 +598,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.case != "channel":
         kwargs.pop("mode", None)
     kwargs.update(case_specific_kwargs(args))
-    if args.geometry is not None:
-        if args.case != "cylinder":
-            raise ValueError(
-                f"--geometry places a body in an external flow and applies to "
-                f"--case cylinder, not '{args.case}'"
-            )
-        kwargs.update(geometry=args.geometry,
-                      geometry_scale=args.geometry_scale,
-                      geometry_rotate=args.geometry_rotate)
+    kwargs.update(geometry_kwargs(args))
 
     result = module.run(outdir=Path(args.outdir) / args.case,
                         make_plots=not args.no_plots,
