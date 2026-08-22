@@ -207,10 +207,44 @@ print(body)          # Obstacle('aerofoil', 412 solid cells, L=0.694)
 print(body.characteristic_length / mesh.dy, "cells across the body")
 ```
 
-`StructuredMesh` also supports geometric stretching (`stretch_x`, `stretch_y`),
-but **the solver will refuse to run on a stretched mesh** — the finite-difference
-operators are derived for uniform spacing, and it raises `NonUniformMeshError`
-rather than quietly returning a first-order answer.
+#### Stretched meshes
+
+A stretched axis puts cells where the flow needs them. Two settings describe
+one: `stretch_x` / `stretch_y`, the growth factor between neighbouring cells,
+and `cluster_x` / `cluster_y`, which end the growth starts from.
+
+| cluster | smallest cells | use it for |
+|---|---|---|
+| `low` (default) | at the low-coordinate end | a single wall, or a shear layer pinned to one side |
+| `walls` | at **both** ends | a channel, or anything bounded by two walls |
+| `centre` | in the **middle** | a body held in the interior of a large domain |
+
+**The mode matters more than the ratio.** Growth has to begin somewhere, and
+`low` refines one end while coarsening everything else. On Poiseuille flow —
+which is symmetric — `low` at ratio 1.05 is *6× worse* than a uniform mesh of
+the same cell count, because the wall it starves costs more than the wall it
+refines wins. `walls` at the identical ratio beats uniform. Choose the mode from
+where the flow has its gradients.
+
+```bash
+python3 -m pycfd.main --case cylinder --nx 128 --ny 64 --stretch-y 1.06 --cluster-y centre
+```
+
+That run resolves the cylinder with ~18 cells across it; a uniform mesh needs
+`--ny 96` to reach 12. For an interior layer of half-width 0.03, 1% error takes
+48 uniform cells per axis, 24 at 4× total growth and 16 at 10× — 4× and 9× fewer
+cells in 2D, second order throughout.
+
+Two things to know before turning it on:
+
+- **The time step follows the smallest cell.** Clustering does not make the step
+  smaller than the resolution you asked for — a stretched wall and a uniform
+  wall of the same thinness take the same step — but the viscous limit scales as
+  `h²`, so a mesh whose finest cell is 100× smaller than its coarsest takes
+  steps set by that finest cell, not by the average.
+- **A stretched axis cannot be periodic**, and the fused Numba kernel is
+  uniform-only, so a stretched run uses the (slower, equally accurate) NumPy
+  operators.
 
 ### 3. Boundary conditions and simulation settings
 
@@ -348,7 +382,8 @@ The remaining settings, all on `SimulationConfig`:
 | `mg_sweeps` | 1 | smoothing sweeps on each side of a multigrid V-cycle. Only read by `mgcg` and `multigrid` |
 | `body_force` | (0, 0) | **force per unit mass** `(fx, fy)` applied everywhere — this is what drives the periodic channel |
 | `use_les` | False | enable the **Smagorinsky sub-grid model** for under-resolved turbulence |
-| `stretch_x`, `stretch_y` | 1.0, 1.0 | geometric cell-growth ratios. The mesh supports them; **the solver does not** and will raise |
+| `stretch_x`, `stretch_y` | 1.0, 1.0 | **geometric cell-growth ratios** between neighbouring cells; `1.0` is uniform. See [Stretched meshes](#stretched-meshes) |
+| `cluster_x`, `cluster_y` | `"low"` | where the stretching puts its **smallest** cells: `low`, `walls` or `centre`. Ignored when the ratio is `1.0` |
 | `name` | `"simulation"` | label used in logs, figure titles and output filenames |
 
 Invalid values are rejected at construction with a specific message, so a bad
@@ -658,6 +693,8 @@ any file to launch a run. `python -m pycfd.main --help` prints the same list.
 |---|---|---|
 | `--re RE` | case-specific | Reynolds number |
 | `--nx N`, `--ny N` | case-specific | cells in x and y |
+| `--stretch-x R`, `--stretch-y R` | 1.0 | geometric cell-growth ratio between neighbouring cells; `1.0` is uniform |
+| `--cluster-x M`, `--cluster-y M` | `low` | where the stretching puts its smallest cells: `low`, `walls`, `centre`. See [Stretched meshes](#stretched-meshes) |
 | `--dt DT` | case-specific | time step; **also the ceiling** under adaptive stepping |
 | `--t-end T` | case-specific | stop time |
 | `--max-steps N` | none | hard cap on iterations, whatever the clock says |

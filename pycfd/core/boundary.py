@@ -432,13 +432,20 @@ class BoundaryManager:
         if not self._outlets:
             return
 
-        dx, dy = self.mesh.dx, self.mesh.dy
         nx, ny = self.mesh.shape
         u, v = fields.u, fields.v
+        uniform = self.mesh.is_uniform
+        # A face on a left/right wall is one cell tall, and on a stretched mesh
+        # the cells differ, so the flux through a wall is a height-weighted sum
+        # rather than a sum times one height.
+        if uniform:
+            widths = (self.mesh.dy, self.mesh.dx)
+        else:
+            widths = (self.mesh.dy_cells, self.mesh.dx_cells)
 
         influx = 0.0        # volume flux entering the domain, positive inward
         outflux = 0.0       # volume flux leaving through the outlets
-        outlet_faces: list[tuple[np.ndarray, float, int]] = []
+        outlet_faces: list[tuple[np.ndarray, np.ndarray | float, int]] = []
 
         for wall, bc in self.conditions.items():
             if bc.kind is BCKind.PERIODIC:
@@ -447,8 +454,11 @@ class BoundaryManager:
             normal = u if wi.axis == 0 else v
             face = _line(normal, wi.axis, wi.n_face)
             face = face[1:ny + 1] if wi.axis == 0 else face[1:nx + 1]
-            width = dy if wi.axis == 0 else dx
-            flux_out = wi.outward * float(face.sum()) * width   # >0 leaves domain
+            width = widths[wi.axis]
+            flux_out = wi.outward * (                          # >0 leaves domain
+                float(face.sum()) * width if uniform
+                else float((face * width).sum())
+            )
 
             if wall in self._outlets:
                 outflux += flux_out
@@ -468,7 +478,10 @@ class BoundaryManager:
             # Degenerate start-up (little or no outflow yet, so a multiplicative
             # rescale would be ill-conditioned or sign-flipping): close the
             # remaining deficit with a uniform additive correction instead.
-            total_area = sum(face.size * width for face, width, _ in outlet_faces)
+            total_area = sum(
+                face.size * width if uniform else float(width.sum())
+                for face, width, _ in outlet_faces
+            )
             deficit = influx - outflux
             for face, _, outward in outlet_faces:
                 face += outward * deficit / total_area

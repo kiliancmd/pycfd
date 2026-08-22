@@ -172,14 +172,21 @@ def validate(sim: Simulation, mode: str = "periodic"):
     # Shape check: the parabola carrying the *same* mass flux as the computed
     # profile.  This isolates the shape from the amplitude, which is checked
     # separately against the theory appropriate to each configuration.
-    flux_peak = PARABOLA_PEAK_OVER_MEAN * float(profile.mean())
+    #
+    # The mean has to be the *flux* mean, so each cell counts for its own
+    # height.  On a uniform mesh that is the arithmetic mean; on a mesh
+    # clustered toward the walls it is not, and using the arithmetic one would
+    # over-weight the thin near-wall cells where the velocity is smallest and
+    # compare the result against a parabola that is too flat.
+    mean_velocity = float(profile @ mesh.dy_cells) / float(mesh.dy_cells.sum())
+    flux_peak = PARABOLA_PEAK_OVER_MEAN * mean_velocity
     exact = poiseuille_profile(mesh.yc, CHANNEL_HEIGHT, flux_peak)
 
     expected_peak = expected_peak_velocity(mode)
     metrics = {
         "u_max_numerical": float(profile.max()),
         "u_max_analytical": expected_peak,
-        "mean_velocity": float(profile.mean()),
+        "mean_velocity": mean_velocity,
         "centerline_error_pct": float(
             abs(profile.max() - expected_peak) / expected_peak * 100.0
         ),

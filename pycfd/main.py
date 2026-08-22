@@ -79,6 +79,16 @@ def build_parser() -> argparse.ArgumentParser:
     grid.add_argument("--re", type=float, default=None, help="Reynolds number")
     grid.add_argument("--nx", type=int, default=None, help="cells in x")
     grid.add_argument("--ny", type=int, default=None, help="cells in y")
+    grid.add_argument("--stretch-x", type=float, default=None,
+                      help="geometric cell-growth ratio in x (1.0 = uniform)")
+    grid.add_argument("--stretch-y", type=float, default=None,
+                      help="geometric cell-growth ratio in y (1.0 = uniform)")
+    grid.add_argument("--cluster-x", choices=("low", "walls", "centre", "center"),
+                      default=None,
+                      help="where --stretch-x puts the small cells (default: low)")
+    grid.add_argument("--cluster-y", choices=("low", "walls", "centre", "center"),
+                      default=None,
+                      help="where --stretch-y puts the small cells (default: low)")
     grid.add_argument("--dt", type=float, default=None, help="initial/fixed time step")
     grid.add_argument("--t-end", type=float, default=None, help="stop time")
     grid.add_argument("--max-steps", type=int, default=None,
@@ -318,6 +328,11 @@ def case_kwargs(args: argparse.Namespace) -> dict:
         overrides["use_les"] = args.use_les
     if args.name is not None:
         overrides["name"] = args.name
+    for axis in ("x", "y"):
+        for opt in ("stretch", "cluster"):
+            value = getattr(args, f"{opt}_{axis}", None)
+            if value is not None:
+                overrides[f"{opt}_{axis}"] = value
     kwargs.update(overrides)
     return kwargs
 

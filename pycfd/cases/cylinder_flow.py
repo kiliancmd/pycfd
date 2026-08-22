@@ -137,6 +137,41 @@ def _resolve_reynolds(re: float | None, wind_speed: float | None,
     return re
 
 
+def _cell_height_at_body(mesh, obstacle) -> float:
+    """Mean cell height over the rows the body occupies.
+
+    "Cells across the body" is a statement about the grid *where the body is*.
+    A stretched mesh has no single cell height, and the domain-wide extremes are
+    both the wrong answer -- the far-field cells say the body is unresolved when
+    it is not.  Averaging over the occupied rows returns exactly ``mesh.dy`` on a
+    uniform mesh, so the benchmark numbers do not move.
+    """
+    rows = np.flatnonzero(np.asarray(obstacle.mask).any(axis=0))
+    if rows.size == 0:
+        return float(mesh.dy_cells.mean())
+    return float(mesh.dy_cells[rows[0]:rows[-1] + 1].mean())
+
+
+def _placement_mesh(nx, ny, length, height, overrides):
+    """The mesh the body is rasterised onto, matching the one that will be run.
+
+    Both entry points here build a mesh *before* the configuration, because the
+    body has to exist before its size is known.  :class:`Simulation` then builds
+    its own mesh from that configuration -- so if the two disagree about cell
+    spacing, the obstacle mask is an array of the right shape describing the
+    wrong geometry, and the body silently moves and changes size.  Reading the
+    stretching out of the overrides here keeps the two meshes identical.
+    """
+    from ..core.mesh import StructuredMesh
+    return StructuredMesh(
+        nx, ny, length, height,
+        stretch_x=overrides.get("stretch_x", 1.0),
+        stretch_y=overrides.get("stretch_y", 1.0),
+        cluster_x=overrides.get("cluster_x", "low"),
+        cluster_y=overrides.get("cluster_y", "low"),
+    )
+
+
 def build(re: float | None = None, nx: int = 256, ny: int = 128,
           t_end: float | None = None, dt: float = 0.02, cfl_max: float = 0.4,
           domain_length: float = DOMAIN_LENGTH, domain_height: float = DOMAIN_HEIGHT,
@@ -176,7 +211,6 @@ def build(re: float | None = None, nx: int = 256, ny: int = 128,
     put the results back into m/s, Pa and seconds.
     """
     from . import override_outlet
-    from ..core.mesh import StructuredMesh
 
     # A benchmark has to pin the physics it validates.  ``use_les`` is a package
     # default that legitimately changes with whatever case is being worked on,
@@ -188,7 +222,7 @@ def build(re: float | None = None, nx: int = 256, ny: int = 128,
     # The mesh is built before the configuration because the body has to exist
     # before its size is known, and its size is what --l-ref overrides and
     # --wind-speed turns into a Reynolds number.
-    mesh = StructuredMesh(nx, ny, domain_length, domain_height)
+    mesh = _placement_mesh(nx, ny, domain_length, domain_height, overrides)
     cy = domain_height / 2.0
     if obstacle is None:
         obstacle = circle_mask(mesh, (cylinder_x, cy), DIAMETER / 2.0, name="cylinder")
@@ -210,10 +244,11 @@ def build(re: float | None = None, nx: int = 256, ny: int = 128,
     re = _resolve_reynolds(re, wind_speed, altitude, reference_length)
 
     span = obstacle.characteristic_length
-    if mesh.dy > span / 8.0:
+    dy_body = _cell_height_at_body(mesh, obstacle)
+    if dy_body > span / 8.0:
         log.warning(
             "only %.1f cells span the body; forces will be crude "
-            "(16 or more is recommended)", span / mesh.dy,
+            "(16 or more is recommended)", span / dy_body,
         )
 
     overrides.setdefault("name", f"cylinder_Re{re:g}")
@@ -315,7 +350,6 @@ def build_from_geometry(path, re: float | None = None, nx: int = 256, ny: int = 
     exactly the case where the default reference length is a guess.
     """
     from ..geometry.obstacles import ObstacleGroup
-    from ..core.mesh import StructuredMesh
 
     single = isinstance(path, (str, Path))
     paths = [path] if single else list(path)
@@ -345,7 +379,7 @@ def build_from_geometry(path, re: float | None = None, nx: int = 256, ny: int = 
 
     domain_length = kwargs.get("domain_length", DOMAIN_LENGTH)
     domain_height = kwargs.get("domain_height", DOMAIN_HEIGHT)
-    mesh = StructuredMesh(nx, ny, domain_length, domain_height)
+    mesh = _placement_mesh(nx, ny, domain_length, domain_height, kwargs)
 
     bodies = [
         _load_body(pth, mesh, sc, rot, ctr, threshold, invert)
@@ -455,7 +489,9 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
     # able to *lower* the reported blockage, which is what happens the moment
     # one body's length stands in for what all of them obstruct.  For a
     # circular cylinder the two agree exactly, so the benchmark is untouched.
-    blocked = sim.bodies.blocked_span(sim.mesh.dy)
+    blocked = sim.bodies.blocked_span(
+        sim.mesh.dy if sim.mesh.is_uniform else sim.mesh.dy_cells
+    )
 
     metrics: dict[str, float] = {
         "cd_mean": cd_average.mean,
@@ -470,7 +506,8 @@ def run(re: float | None = None, nx: int = 256, ny: int = 128,
         # bodies abreast that is both of them, and for two in tandem neither
         # body's neighbour adds anything.
         "characteristic_length": sim.obstacle.characteristic_length,
-        "cells_across_body": sim.obstacle.characteristic_length / sim.mesh.dy,
+        "cells_across_body": (sim.obstacle.characteristic_length
+                              / _cell_height_at_body(sim.mesh, sim.obstacle)),
         "blockage_ratio": blocked / sim.mesh.ly,
         # The length Re, Cd and St were actually formed with -- the same number
         # unless --l-ref asked for a different convention.

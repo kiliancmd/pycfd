@@ -26,10 +26,11 @@ def vorticity_corner(fields: FlowField) -> np.ndarray:
     interpolation is involved.
     """
     nx, ny = fields.mesh.shape
-    dx, dy = fields.mesh.dx, fields.mesh.dy
+    m = fields.mesh.metrics
     u, v = fields.u, fields.v
-    dvdx = (v[1:nx + 2, 1:ny + 2] - v[0:nx + 1, 1:ny + 2]) / dx
-    dudy = (u[1:nx + 2, 1:ny + 2] - u[1:nx + 2, 0:ny + 1]) / dy
+    # Each derivative crosses a face, so both span centre to centre.
+    dvdx = (v[1:nx + 2, 1:ny + 2] - v[0:nx + 1, 1:ny + 2]) / m.hxu
+    dudy = (u[1:nx + 2, 1:ny + 2] - u[1:nx + 2, 0:ny + 1]) / m.hyv
     return dvdx - dudy
 
 
@@ -53,14 +54,16 @@ def stream_function(fields: FlowField) -> np.ndarray:
     prescribed boundary values exactly.
     """
     nx, ny = fields.mesh.shape
-    dx, dy = fields.mesh.dx, fields.mesh.dy
+    mesh = fields.mesh
 
     psi = np.zeros((nx + 1, ny + 1))
-    # Walk along the bottom edge using v, then up each column using u.
+    # Walk along the bottom edge using v, then up each column using u.  Each
+    # step of the walk crosses one cell, so it is weighted by that cell's own
+    # width or height rather than by a single spacing.
     v_bottom = fields.v[1:nx + 1, 1]                    # v on the y=0 face
-    psi[1:, 0] = -np.cumsum(v_bottom) * dx
+    psi[1:, 0] = -np.cumsum(v_bottom * mesh.dx_cells)
     u_col = fields.u[1:nx + 2, 1:ny + 1]                # u on every x-face
-    psi[:, 1:] = psi[:, 0][:, None] + np.cumsum(u_col, axis=1) * dy
+    psi[:, 1:] = psi[:, 0][:, None] + np.cumsum(u_col * mesh.dy_cells[None, :], axis=1)
     return psi
 
 
@@ -73,7 +76,7 @@ def kinetic_energy(fields: FlowField, mask: np.ndarray | None = None) -> float:
     e = 0.5 * (uc ** 2 + vc ** 2)
     if mask is not None:
         e = np.where(mask, 0.0, e)
-    return float(e.sum()) * fields.mesh.cell_area
+    return fields.mesh.metrics.integrate(e)
 
 
 def enstrophy(fields: FlowField, mask: np.ndarray | None = None) -> float:
@@ -82,7 +85,7 @@ def enstrophy(fields: FlowField, mask: np.ndarray | None = None) -> float:
     e = 0.5 * w ** 2
     if mask is not None:
         e = np.where(mask, 0.0, e)
-    return float(e.sum()) * fields.mesh.cell_area
+    return fields.mesh.metrics.integrate(e)
 
 
 def divergence_norms(fields: FlowField, solver) -> tuple[float, float]:

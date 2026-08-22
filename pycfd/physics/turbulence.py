@@ -35,14 +35,28 @@ class SmagorinskyModel:
     """
 
     def __init__(self, mesh: StructuredMesh, cs: float = 0.17) -> None:
-        mesh.require_uniform("Smagorinsky model")
         if cs < 0:
             raise ValueError(f"Smagorinsky constant must be non-negative, got {cs}")
         self.mesh = mesh
+        self.metrics = mesh.metrics
         self.cs = float(cs)
-        #: Filter width: geometric mean of the cell dimensions.
-        self.delta = float(np.sqrt(mesh.dx * mesh.dy))
-        self._coeff = (self.cs * self.delta) ** 2
+        #: Filter width: geometric mean of the cell dimensions.  On a stretched
+        #: mesh this is per-cell -- the filter width *is* the local grid, so a
+        #: single number would over-damp the fine region and under-damp the
+        #: coarse one, which is the whole reason the grid was stretched.
+        if mesh.is_uniform:
+            self.delta: float | np.ndarray = float(np.sqrt(mesh.dx * mesh.dy))
+            self._coeff: float | np.ndarray = (self.cs * self.delta) ** 2
+        else:
+            delta = np.sqrt(mesh.dx_cells[:, None] * mesh.dy_cells[None, :])
+            self.delta = delta
+            # Cell-centred quantities carry the ghosted pressure shape, so the
+            # coefficient has to as well; the ghost ring repeats its neighbour.
+            coeff = np.empty((mesh.nx + 2, mesh.ny + 2))
+            coeff[1:mesh.nx + 1, 1:mesh.ny + 1] = (self.cs * delta) ** 2
+            coeff[0, :], coeff[mesh.nx + 1, :] = coeff[1, :], coeff[mesh.nx, :]
+            coeff[:, 0], coeff[:, mesh.ny + 1] = coeff[:, 1], coeff[:, mesh.ny]
+            self._coeff = coeff
         self.last_nu_t_max = 0.0
 
     # ------------------------------------------------------------------ #
@@ -53,13 +67,15 @@ class SmagorinskyModel:
         indexed exactly like ``p``; the corner array has shape ``(nx+1, ny+1)``.
         """
         nx, ny = self.mesh.shape
-        dx, dy = self.mesh.dx, self.mesh.dy
+        m = self.metrics
 
-        s11 = (u[1:nx + 3, :] - u[0:nx + 2, :]) / dx
-        s22 = (v[:, 1:ny + 3] - v[:, 0:ny + 2]) / dy
+        # Normal strains are differenced across a cell (ghost-extended), shear
+        # strains across a face -- the same two spacings the viscous term uses.
+        s11 = (u[1:nx + 3, :] - u[0:nx + 2, :]) / m.hx_ext
+        s22 = (v[:, 1:ny + 3] - v[:, 0:ny + 2]) / m.hy_ext
 
-        dudy = (u[1:nx + 2, 1:ny + 2] - u[1:nx + 2, 0:ny + 1]) / dy
-        dvdx = (v[1:nx + 2, 1:ny + 2] - v[0:nx + 1, 1:ny + 2]) / dx
+        dudy = (u[1:nx + 2, 1:ny + 2] - u[1:nx + 2, 0:ny + 1]) / m.hyv
+        dvdx = (v[1:nx + 2, 1:ny + 2] - v[0:nx + 1, 1:ny + 2]) / m.hxu
         s12_corner = 0.5 * (dudy + dvdx)
 
         # Average the four surrounding corners onto each interior cell centre,
@@ -97,4 +113,6 @@ class SmagorinskyModel:
         return nu_c, nu_corner
 
     def __repr__(self) -> str:
-        return f"SmagorinskyModel(cs={self.cs:g}, delta={self.delta:.4g})"
+        delta = (f"{self.delta:.4g}" if np.isscalar(self.delta)
+                 else f"[{self.delta.min():.4g}, {self.delta.max():.4g}]")
+        return f"SmagorinskyModel(cs={self.cs:g}, delta={delta})"

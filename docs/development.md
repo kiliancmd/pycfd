@@ -11,7 +11,7 @@ solver represents.
 python -m pytest pycfd/tests -q
 ```
 
-630 tests covering mesh geometry, obstacle construction from every supported
+675 tests covering mesh geometry, obstacle construction from every supported
 source, all six boundary condition types, Poisson assembly and all six linear
 solvers, discrete conservation, the analytical benchmarks, dimensional
 bookkeeping, CLI plumbing, output provenance, and the export round-trips — plus
@@ -267,10 +267,14 @@ stencils. `visualization/` and `analysis/` never import from `core/`, and
   raises `NotImplementedError`. Every build phase and success criterion in the
   specification targets the projection method; SIMPLE was left as a clearly
   flagged gap rather than a half-built alternative.
-- **Stretched meshes are generated but not solved on.** `StructuredMesh`
-  supports geometric stretching and is tested for it, but the finite-difference
-  operators are derived for uniform spacing, so the solver raises
-  `NonUniformMeshError` rather than quietly producing a first-order answer.
+- **A stretched axis cannot also be periodic.** Everything else runs on a
+  stretched mesh, but a periodic axis has to wrap the last cell onto the first,
+  and geometric stretching leaves those two cells different sizes, so the wrap
+  is a discontinuity in the metric. The solver raises rather than accepting a
+  mesh whose stretched direction is periodic.
+- **The fused Numba kernel is uniform-only.** It hard-codes a scalar `dx`, so a
+  stretched mesh falls back to the NumPy operators. That is a speed difference,
+  not an accuracy one — the two paths are checked against each other.
 - **The stream function is integrated, not solved for.** The specification asks
   for `∇²ψ = −ω`; since the discrete divergence vanishes to machine precision,
   direct integration of `u = ∂ψ/∂y` is path-independent, exact, cheaper, and

@@ -372,9 +372,22 @@ def test_simple_solver_is_reported_as_unimplemented():
         ProjectionSolver(cfg)
 
 
-def test_stretched_mesh_is_refused_by_the_solver():
+def test_a_stretched_mesh_is_accepted_by_the_solver():
     cfg = cavity_config(stretch_y=1.05)
-    with pytest.raises(NonUniformMeshError, match="uniform"):
+    solver = ProjectionSolver(cfg)
+    assert not solver.mesh.is_uniform
+
+
+def test_a_stretched_periodic_axis_is_refused():
+    """Stretching and periodicity are contradictory, not merely unimplemented.
+
+    Geometric growth leaves the first and last cell different widths, so the
+    spacing is discontinuous across the seam and the domain does not repeat.
+    The operators would happily divide a flux there by a spacing from the far
+    end of the domain and return a plausible wrong number.
+    """
+    cfg = cavity_config(stretch_x=1.05, boundary_config=periodic_walls())
+    with pytest.raises(NonUniformMeshError, match="periodic and stretched"):
         ProjectionSolver(cfg)
 
 

@@ -53,7 +53,7 @@ from ..config import (
 from . import kernels
 from .boundary import BoundaryManager
 from .fields import FlowField
-from .mesh import StructuredMesh
+from .mesh import MeshMetrics, NonUniformMeshError, StructuredMesh
 from .pressure import assemble_poisson_matrix, make_pressure_solver
 
 log = logging.getLogger(__name__)
@@ -114,12 +114,13 @@ class ProjectionSolver:
 
         self.config = config
         self.mesh = mesh if mesh is not None else StructuredMesh.from_config(config)
-        self.mesh.require_uniform("ProjectionSolver")
+        self.metrics = self.mesh.metrics
         self.nu = config.nu
 
         self.boundaries = BoundaryManager(config.boundary_config, self.mesh)
         self.periodic_x = self.boundaries.periodic_x
         self.periodic_y = self.boundaries.periodic_y
+        self._reject_stretched_periodic()
 
         nx, ny = self.mesh.shape
         if obstacle is None:
@@ -178,9 +179,12 @@ class ProjectionSolver:
         self._blend = 0.0    # donor-cell blending factor in force for this substep
 
         # The fused kernel covers the constant-viscosity case only; the
-        # Smagorinsky closure needs the variable-viscosity stress form.
+        # Smagorinsky closure needs the variable-viscosity stress form.  It
+        # also takes a scalar dx/dy, so a stretched mesh falls back to the
+        # array stencils rather than being handed a spacing that is a lie.
         self._use_kernel = (
-            config.use_numba and kernels.NUMBA_AVAILABLE and self.turbulence is None
+            config.use_numba and kernels.NUMBA_AVAILABLE
+            and self.turbulence is None and self.mesh.is_uniform
         )
         if self._use_kernel:
             self._rhs_u = np.empty((nx + 1, ny))
@@ -189,6 +193,41 @@ class ProjectionSolver:
             kernels.warmup(nx * ny)
         elif config.use_numba and not kernels.NUMBA_AVAILABLE:
             log.info("numba is not installed; using the vectorised NumPy stencils")
+
+    @staticmethod
+    def _momentum_sum(faces: np.ndarray, mask: np.ndarray, area) -> float:
+        """Momentum carried by the masked faces, given their control volumes.
+
+        Weighting before the reduction is what a varying area requires; on a
+        uniform mesh one scalar multiply after it is both cheaper and the exact
+        arithmetic the recorded forces were measured with.
+        """
+        if np.isscalar(area):
+            return float(faces[mask].sum()) * area
+        return float((faces * area)[mask].sum())
+
+    def _reject_stretched_periodic(self) -> None:
+        """Refuse a stretched axis that is also periodic.
+
+        Geometric stretching makes the first and last cell different widths, so
+        the spacing jumps across the seam and the domain does not repeat.  The
+        operators would still produce numbers there -- wrong ones, from a flux
+        divided by a spacing that belongs to the other end of the domain -- so
+        this is caught at construction instead of at the seam.
+        """
+        for axis, stretched, periodic, ratio in (
+            ("x", self.mesh.stretched_x, self.periodic_x, self.mesh.stretch_x),
+            ("y", self.mesh.stretched_y, self.periodic_y, self.mesh.stretch_y),
+        ):
+            if stretched and periodic:
+                raise NonUniformMeshError(
+                    f"the {axis} axis is periodic and stretched "
+                    f"(stretch_{axis}={ratio}): the first and last cells differ "
+                    "in width, so the spacing is discontinuous across the seam "
+                    "and the domain does not actually repeat. Use "
+                    f"stretch_{axis}=1.0 on a periodic axis, or a "
+                    "non-periodic boundary condition."
+                )
 
     # ------------------------------------------------------------------ #
     # Index bookkeeping
@@ -222,6 +261,17 @@ class ProjectionSolver:
         v_hi = ny + 2 if (kinds["top"] is outlet and not self.periodic_y) else ny + 1
         self.v_upd = (slice(1, nx + 1), slice(v_lo, v_hi))
         self.v_rhs_sel = slice(v_lo - 1, v_hi - 1)
+
+        # Control-volume area behind each updated velocity face, for turning a
+        # velocity into the momentum it carries.  A u face owns a centre-to-
+        # centre width and a full cell height; a v face the other way round.
+        # Both are the scalar cell area on a uniform mesh.
+        m = self.metrics
+        if self.mesh.is_uniform:
+            self._u_cv_area = self._v_cv_area = self.mesh.cell_area
+        else:
+            self._u_cv_area = (m.hxu[u_lo - 1:u_hi - 1, :] * m.hy)
+            self._v_cv_area = (m.hx * m.hyv[:, v_lo - 1:v_hi - 1])
 
         if self.has_obstacle:
             self.u_face_solid = _face_solid_mask(
@@ -285,14 +335,27 @@ class ProjectionSolver:
         """Velocity components interpolated to cell corners.
 
         Returns ``(u_c, v_c)``, both of shape ``(nx+1, ny+1)`` and indexed
-        ``[m-1, n-1]`` for the corner at ``x=(m-1)dx``, ``y=(n-1)dy``.  Sharing
+        ``[m-1, n-1]`` for the corner at ``x=xf[m-1]``, ``y=yf[n-1]``.  Sharing
         one corner evaluation between the two momentum equations is what makes
         the convective discretisation conservative.
+
+        ``u`` is interpolated along y and ``v`` along x, each across a pair of
+        cell centres.  A corner is *not* the midpoint of that pair once the
+        mesh is stretched, so the weights come from the geometry; they collapse
+        to the plain average when it is not.
         """
         nx, ny = self.mesh.shape
-        u_c = 0.5 * (u[1:nx + 2, 0:ny + 1] + u[1:nx + 2, 1:ny + 2])
-        v_c = 0.5 * (v[0:nx + 1, 1:ny + 2] + v[1:nx + 2, 1:ny + 2])
-        return u_c, v_c
+        m = self.metrics
+        wy, wx = m.wy_corner, m.wx_corner
+
+        u_lo, u_hi = u[1:nx + 2, 0:ny + 1], u[1:nx + 2, 1:ny + 2]
+        v_lo, v_hi = v[0:nx + 1, 1:ny + 2], v[1:nx + 2, 1:ny + 2]
+        if self.mesh.is_uniform:
+            # Algebraically the same as the weighted form below at w = 1/2, but
+            # written so the uniform mesh keeps the exact rounding it had
+            # before stretching existed and the recorded baselines still hold.
+            return 0.5 * (u_lo + u_hi), 0.5 * (v_lo + v_hi)
+        return u_lo + wy * (u_hi - u_lo), v_lo + wx * (v_hi - v_lo)
 
     def _advection(self, u: np.ndarray, v: np.ndarray, blend: float):
         """Convective terms ``(A_u, A_v)`` in conservative form.
@@ -303,46 +366,52 @@ class ProjectionSolver:
         second-order central differencing.
         """
         nx, ny = self.mesh.shape
-        dx, dy = self.mesh.dx, self.mesh.dy
+        m = self.metrics
 
         u_c, v_c = self._corner_products(u, v)
         uv = u_c * v_c
         # Cell-centred interpolants of each component along its own direction.
+        # A cell centre *is* the midpoint of its own two faces however the mesh
+        # is stretched, so this stays a plain average.
         u_cc = 0.5 * (u[0:nx + 2, :] + u[1:nx + 3, :])       # [m, j], m = 0..nx+1
         v_cc = 0.5 * (v[:, 0:ny + 2] + v[:, 1:ny + 3])       # [i, n], n = 0..ny+1
 
         # -- u momentum, faces m = 1..nx+1, rows j = 1..ny ------------------ #
+        # Streamwise flux is differenced across the u face's own control
+        # volume (centre to centre, hxu); the transverse one across the cell.
         uu_r = u_cc[1:nx + 2, 1:ny + 1]      # cell to the right of face m
         uu_l = u_cc[0:nx + 1, 1:ny + 1]      # cell to the left  of face m
-        duudx = (uu_r ** 2 - uu_l ** 2) / dx
-        duvdy = (uv[0:nx + 1, 1:ny + 1] - uv[0:nx + 1, 0:ny]) / dy
+        duudx = (uu_r ** 2 - uu_l ** 2) / m.hxu
+        duvdy = (uv[0:nx + 1, 1:ny + 1] - uv[0:nx + 1, 0:ny]) / m.hy
 
         # -- v momentum, faces n = 1..ny+1, cols i = 1..nx ------------------ #
         vv_t = v_cc[1:nx + 1, 1:ny + 2]      # cell above face n
         vv_b = v_cc[1:nx + 1, 0:ny + 1]      # cell below face n
-        dvvdy = (vv_t ** 2 - vv_b ** 2) / dy
-        duvdx = (uv[1:nx + 1, 0:ny + 1] - uv[0:nx, 0:ny + 1]) / dx
+        dvvdy = (vv_t ** 2 - vv_b ** 2) / m.hyv
+        duvdx = (uv[1:nx + 1, 0:ny + 1] - uv[0:nx, 0:ny + 1]) / m.hx
 
         if blend > 0.0:
             # Donor-cell correction: upwind-weighted differences of the
             # transported quantity, scaled by the magnitude of the transporting
             # velocity.  Reduces to first-order upwinding at blend = 1.
+            # Each correction is differenced over the same control volume as
+            # the central flux it corrects, so the spacings match those above.
             um, u0, up = u[0:nx + 1, 1:ny + 1], u[1:nx + 2, 1:ny + 1], u[2:nx + 3, 1:ny + 1]
-            duudx += blend / dx * (
+            duudx += blend / m.hxu * (
                 np.abs(uu_r) * (u0 - up) / 2.0 - np.abs(uu_l) * (um - u0) / 2.0
             )
             ud, uc0, uu_ = u[1:nx + 2, 0:ny], u[1:nx + 2, 1:ny + 1], u[1:nx + 2, 2:ny + 2]
-            duvdy += blend / dy * (
+            duvdy += blend / m.hy * (
                 np.abs(v_c[0:nx + 1, 1:ny + 1]) * (uc0 - uu_) / 2.0
                 - np.abs(v_c[0:nx + 1, 0:ny]) * (ud - uc0) / 2.0
             )
 
             vm, v0, vp = v[1:nx + 1, 0:ny + 1], v[1:nx + 1, 1:ny + 2], v[1:nx + 1, 2:ny + 3]
-            dvvdy += blend / dy * (
+            dvvdy += blend / m.hyv * (
                 np.abs(vv_t) * (v0 - vp) / 2.0 - np.abs(vv_b) * (vm - v0) / 2.0
             )
             vl, vc0, vr = v[0:nx, 1:ny + 2], v[1:nx + 1, 1:ny + 2], v[2:nx + 2, 1:ny + 2]
-            duvdx += blend / dx * (
+            duvdx += blend / m.hx * (
                 np.abs(u_c[1:nx + 1, 0:ny + 1]) * (vc0 - vr) / 2.0
                 - np.abs(u_c[0:nx, 0:ny + 1]) * (vl - vc0) / 2.0
             )
@@ -350,20 +419,49 @@ class ProjectionSolver:
         return duudx + duvdy, duvdx + dvvdy
 
     def _diffusion(self, u: np.ndarray, v: np.ndarray):
-        """Viscous terms ``(D_u, D_v)`` for constant kinematic viscosity."""
-        nx, ny = self.mesh.shape
-        dx2, dy2 = self.mesh.dx ** 2, self.mesh.dy ** 2
+        """Viscous terms ``(D_u, D_v)`` for constant kinematic viscosity.
 
+        Written as a difference of two first derivatives rather than the
+        familiar three-point second difference, because on a stretched mesh
+        those are not the same operator: the inner gradients span the two cells
+        flanking the face, and the outer difference spans the face's own
+        control volume.  Collapsing that to ``(a - 2b + c)/h**2`` is what makes
+        a stretched-grid viscous term first order.
+        """
+        nx, ny = self.mesh.shape
+        m = self.metrics
+        if self.mesh.is_uniform:
+            # Same operator, kept in its original grouping so a uniform run
+            # reproduces its recorded baselines bit for bit.
+            dx2, dy2 = m.hx ** 2, m.hy ** 2
+            u0 = u[1:nx + 2, 1:ny + 1]
+            d2u = (
+                (u[0:nx + 1, 1:ny + 1] - 2.0 * u0 + u[2:nx + 3, 1:ny + 1]) / dx2
+                + (u[1:nx + 2, 0:ny] - 2.0 * u0 + u[1:nx + 2, 2:ny + 2]) / dy2
+            )
+            v0 = v[1:nx + 1, 1:ny + 2]
+            d2v = (
+                (v[0:nx, 1:ny + 2] - 2.0 * v0 + v[2:nx + 2, 1:ny + 2]) / dx2
+                + (v[1:nx + 1, 0:ny + 1] - 2.0 * v0 + v[1:nx + 1, 2:ny + 3]) / dy2
+            )
+            return self.nu * d2u, self.nu * d2v
+
+        sl = MeshMetrics._slice
+        # u lives on x-faces m = 0..nx and on cell rows j = 0..ny-1.
         u0 = u[1:nx + 2, 1:ny + 1]
-        d2u = (
-            (u[0:nx + 1, 1:ny + 1] - 2.0 * u0 + u[2:nx + 3, 1:ny + 1]) / dx2
-            + (u[1:nx + 2, 0:ny] - 2.0 * u0 + u[1:nx + 2, 2:ny + 2]) / dy2
-        )
+        gx_hi = (u[2:nx + 3, 1:ny + 1] - u0) / sl(m.hx_ext, 1, nx + 2, 0)
+        gx_lo = (u0 - u[0:nx + 1, 1:ny + 1]) / sl(m.hx_ext, 0, nx + 1, 0)
+        gy_hi = (u[1:nx + 2, 2:ny + 2] - u0) / sl(m.hyv, 1, ny + 1, 1)
+        gy_lo = (u0 - u[1:nx + 2, 0:ny]) / sl(m.hyv, 0, ny, 1)
+        d2u = (gx_hi - gx_lo) / m.hxu + (gy_hi - gy_lo) / m.hy
+
+        # v lives on cell columns i = 0..nx-1 and on y-faces n = 0..ny.
         v0 = v[1:nx + 1, 1:ny + 2]
-        d2v = (
-            (v[0:nx, 1:ny + 2] - 2.0 * v0 + v[2:nx + 2, 1:ny + 2]) / dx2
-            + (v[1:nx + 1, 0:ny + 1] - 2.0 * v0 + v[1:nx + 1, 2:ny + 3]) / dy2
-        )
+        hx_hi = (v[2:nx + 2, 1:ny + 2] - v0) / sl(m.hxu, 1, nx + 1, 0)
+        hx_lo = (v0 - v[0:nx, 1:ny + 2]) / sl(m.hxu, 0, nx, 0)
+        hy_hi = (v[1:nx + 1, 2:ny + 3] - v0) / sl(m.hy_ext, 1, ny + 2, 1)
+        hy_lo = (v0 - v[1:nx + 1, 0:ny + 1]) / sl(m.hy_ext, 0, ny + 1, 1)
+        d2v = (hx_hi - hx_lo) / m.hx + (hy_hi - hy_lo) / m.hyv
         return self.nu * d2u, self.nu * d2v
 
     def _diffusion_variable(self, u: np.ndarray, v: np.ndarray, nu_c: np.ndarray,
@@ -374,26 +472,29 @@ class ProjectionSolver:
         is corner-based with shape ``(nx+1, ny+1)``.
         """
         nx, ny = self.mesh.shape
-        dx, dy = self.mesh.dx, self.mesh.dy
+        m = self.metrics
+        sl = MeshMetrics._slice
 
         # Shear stress tau = nu * (du/dy + dv/dx), evaluated at the corners.
-        dudy_c = (u[1:nx + 2, 1:ny + 2] - u[1:nx + 2, 0:ny + 1]) / dy
-        dvdx_c = (v[1:nx + 2, 1:ny + 2] - v[0:nx + 1, 1:ny + 2]) / dx
+        # Both derivatives cross a face, so both use a centre-to-centre span.
+        dudy_c = (u[1:nx + 2, 1:ny + 2] - u[1:nx + 2, 0:ny + 1]) / m.hyv
+        dvdx_c = (v[1:nx + 2, 1:ny + 2] - v[0:nx + 1, 1:ny + 2]) / m.hxu
         tau = nu_corner * (dudy_c + dvdx_c)
 
-        # Normal stresses live at cell centres.
-        dudx_cc = (u[1:nx + 3, :] - u[0:nx + 2, :]) / dx        # [m, j], m = 0..nx+1
-        dvdy_cc = (v[:, 1:ny + 3] - v[:, 0:ny + 2]) / dy        # [i, n], n = 0..ny+1
+        # Normal stresses live at cell centres, so they are differenced over a
+        # cell width; the ghost columns extend that by one at each end.
+        dudx_cc = (u[1:nx + 3, :] - u[0:nx + 2, :]) / m.hx_ext   # [m, j], m = 0..nx+1
+        dvdy_cc = (v[:, 1:ny + 3] - v[:, 0:ny + 2]) / m.hy_ext   # [i, n], n = 0..ny+1
 
         d_u = (
             2.0 * (nu_c[1:nx + 2, 1:ny + 1] * dudx_cc[1:nx + 2, 1:ny + 1]
-                   - nu_c[0:nx + 1, 1:ny + 1] * dudx_cc[0:nx + 1, 1:ny + 1]) / dx
-            + (tau[0:nx + 1, 1:ny + 1] - tau[0:nx + 1, 0:ny]) / dy
+                   - nu_c[0:nx + 1, 1:ny + 1] * dudx_cc[0:nx + 1, 1:ny + 1]) / m.hxu
+            + (tau[0:nx + 1, 1:ny + 1] - tau[0:nx + 1, 0:ny]) / m.hy
         )
         d_v = (
-            (tau[1:nx + 1, 0:ny + 1] - tau[0:nx, 0:ny + 1]) / dx
+            (tau[1:nx + 1, 0:ny + 1] - tau[0:nx, 0:ny + 1]) / m.hx
             + 2.0 * (nu_c[1:nx + 1, 1:ny + 2] * dvdy_cc[1:nx + 1, 1:ny + 2]
-                     - nu_c[1:nx + 1, 0:ny + 1] * dvdy_cc[1:nx + 1, 0:ny + 1]) / dy
+                     - nu_c[1:nx + 1, 0:ny + 1] * dvdy_cc[1:nx + 1, 0:ny + 1]) / m.hyv
         )
         return d_u, d_v
 
@@ -429,12 +530,16 @@ class ProjectionSolver:
 
     # ------------------------------------------------------------------ #
     def divergence(self, u: np.ndarray, v: np.ndarray) -> np.ndarray:
-        """Discrete divergence at cell centres, shape ``(nx, ny)``."""
+        """Discrete divergence at cell centres, shape ``(nx, ny)``.
+
+        A flux balance over the cell, so it divides by the cell's own width and
+        height -- exact on any spacing, stretched or not.
+        """
         nx, ny = self.mesh.shape
-        dx, dy = self.mesh.dx, self.mesh.dy
+        m = self.metrics
         return (
-            (u[2:nx + 2, 1:ny + 1] - u[1:nx + 1, 1:ny + 1]) / dx
-            + (v[1:nx + 1, 2:ny + 2] - v[1:nx + 1, 1:ny + 1]) / dy
+            (u[2:nx + 2, 1:ny + 1] - u[1:nx + 1, 1:ny + 1]) / m.hx
+            + (v[1:nx + 1, 2:ny + 2] - v[1:nx + 1, 1:ny + 1]) / m.hy
         )
 
     def max_divergence(self, fields: FlowField) -> float:
@@ -469,9 +574,9 @@ class ProjectionSolver:
         u_faces = u[self.u_upd]
         v_faces = v[self.v_upd]
         if dt is not None:
-            cell_area = self.mesh.cell_area
-            fx = float(u_faces[self.u_face_solid].sum()) * cell_area / dt
-            fy = float(v_faces[self.v_face_solid].sum()) * cell_area / dt
+            u_area, v_area = self._u_cv_area, self._v_cv_area
+            fx = self._momentum_sum(u_faces, self.u_face_solid, u_area) / dt
+            fy = self._momentum_sum(v_faces, self.v_face_solid, v_area) / dt
             if reset:
                 self.body_force_reaction = (fx, fy)
             else:
@@ -479,8 +584,8 @@ class ProjectionSolver:
                 self.body_force_reaction = (prev[0] + fx, prev[1] + fy)
             if self.body_masks:
                 per_body = tuple(
-                    (float(u_faces[um].sum()) * cell_area / dt,
-                     float(v_faces[vm].sum()) * cell_area / dt)
+                    (self._momentum_sum(u_faces, um, u_area) / dt,
+                     self._momentum_sum(v_faces, vm, v_area) / dt)
                     for um, vm in zip(self.u_face_body, self.v_face_body)
                 )
                 if reset:
@@ -563,15 +668,18 @@ class ProjectionSolver:
         # the value from the opposite end of the domain rather than zero.
         self.boundaries.apply_pressure(FlowField(self.mesh, u, v, p))
 
-        dx, dy = self.mesh.dx, self.mesh.dy
+        m = self.metrics
         lo_u, hi_u = self.u_upd[0].start, self.u_upd[0].stop
         lo_v, hi_v = self.v_upd[1].start, self.v_upd[1].stop
+        # The gradient crosses a face, so it divides by the centre-to-centre
+        # distance -- the same spacing the Poisson stencil was assembled with,
+        # which is what keeps the projected field divergence-free to round-off.
         u[self.u_upd] -= dt * (
             p[lo_u:hi_u, 1:ny + 1] - p[lo_u - 1:hi_u - 1, 1:ny + 1]
-        ) / dx
+        ) / MeshMetrics._slice(m.hxu, lo_u - 1, hi_u - 1, 0)
         v[self.v_upd] -= dt * (
             p[1:nx + 1, lo_v:hi_v] - p[1:nx + 1, lo_v - 1:hi_v - 1]
-        ) / dy
+        ) / MeshMetrics._slice(m.hyv, lo_v - 1, hi_v - 1, 1)
         return p
 
     # ------------------------------------------------------------------ #
@@ -641,5 +749,8 @@ class ProjectionSolver:
         if self.config.upwind_blend is not None:
             return self.config.upwind_blend
         umax, vmax = fields.max_velocity()
-        courant = max(umax * dt / self.mesh.dx, vmax * dt / self.mesh.dy)
+        # The blend has to cover the worst cell, which on a stretched mesh is
+        # the smallest one.
+        m = self.metrics
+        courant = max(umax * dt / m.min_hx, vmax * dt / m.min_hy)
         return float(min(1.0, 1.2 * courant))

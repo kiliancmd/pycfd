@@ -129,8 +129,8 @@ def circle_mask(mesh: StructuredMesh, center: tuple[float, float], radius: float
     if not mask.any():
         raise ValueError(
             f"circle of radius {radius:g} does not cover a single cell on a "
-            f"{mesh.nx}x{mesh.ny} grid (dx={mesh.dx:g}); refine the mesh or "
-            "enlarge the obstacle"
+            f"{mesh.nx}x{mesh.ny} grid (finest dx={mesh.dx_cells.min():g}); "
+            "refine the mesh or enlarge the obstacle"
         )
     return Obstacle(mask, frac, 2.0 * radius, name)
 
@@ -295,7 +295,8 @@ def polygon_mask(mesh: StructuredMesh, vertices: np.ndarray,
     if not mask.any():
         raise ValueError(
             f"the outline does not cover a single cell on a {mesh.nx}x{mesh.ny} "
-            f"grid (dx={mesh.dx:g}, dy={mesh.dy:g}); refine the mesh or scale the "
+            f"grid (finest dx={mesh.dx_cells.min():g}, "
+            f"dy={mesh.dy_cells.min():g}); refine the mesh or scale the "
             "geometry up with transform_polygon()"
         )
 
@@ -357,7 +358,12 @@ def mask_from_image(mesh: StructuredMesh, path: str | Path, threshold: float = 0
 
     if characteristic_length is None:
         rows_used = np.flatnonzero(mask.any(axis=0))
-        characteristic_length = float((rows_used[-1] - rows_used[0] + 1) * mesh.dy)
+        # The span is the total *height* of the rows the silhouette occupies.
+        # On a uniform mesh that is the row count times dy; on a stretched one
+        # the rows differ, so they have to be added up rather than counted.
+        characteristic_length = float(
+            mesh.dy_cells[rows_used[0]:rows_used[-1] + 1].sum()
+        )
     return Obstacle(mask, frac, float(characteristic_length), name)
 
 # formula
@@ -578,7 +584,7 @@ class ObstacleGroup:
         """Total solid area in cell units."""
         return float(sum(m.area for m in self.members))
 
-    def blocked_span(self, dy: float) -> float:
+    def blocked_span(self, dy: float | np.ndarray) -> float:
         """Worst-case extent of flow the bodies block, across the stream.
 
         Blockage is what the walls feel, and for several bodies that is not any
@@ -589,8 +595,13 @@ class ObstacleGroup:
 
         Measured from the mask, so it is quantised to the grid -- which is the
         honest number here, since the staircase is what the flow actually sees.
+
+        ``dy`` is a single cell height or, on a stretched mesh, the array of
+        them; the blocked extent of a column is then the total height of its
+        solid cells rather than a count times one height.  The two expressions
+        coincide cell for cell on a uniform mesh.
         """
-        return float(self.mask.sum(axis=1).max()) * dy
+        return float((self.mask * np.asarray(dy)).sum(axis=1).max())
 
     def __len__(self) -> int:
         return len(self.members)

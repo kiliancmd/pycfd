@@ -192,6 +192,8 @@ class SimulationConfig:
     ly: float = 1.0
     stretch_x: float = 1.0          # geometric cell-growth ratio (1.0 = uniform)
     stretch_y: float = 1.0
+    cluster_x: str = "low"          # where the small cells go: low/walls/centre
+    cluster_y: str = "low"
 
     # -- time -------------------------------------------------------------- #
     dt: float = 1.0e-3              # initial / fixed time step
@@ -293,6 +295,11 @@ class SimulationConfig:
             raise ValueError(f"cfl_max must lie in (0, 1], got {self.cfl_max}")
         if self.stretch_x <= 0 or self.stretch_y <= 0:
             raise ValueError("stretch ratios must be positive")
+        # Normalise here rather than in the mesh so a bad spelling is caught
+        # when the config is built, not several seconds into a run.
+        from .core.mesh import _normalise_cluster
+        object.__setattr__(self, "cluster_x", _normalise_cluster(self.cluster_x))
+        object.__setattr__(self, "cluster_y", _normalise_cluster(self.cluster_y))
         if self.upwind_blend is not None and not 0.0 <= self.upwind_blend <= 1.0:
             raise ValueError(
                 f"upwind_blend must lie in [0, 1], got {self.upwind_blend}"

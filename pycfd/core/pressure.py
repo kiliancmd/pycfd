@@ -78,6 +78,11 @@ class PoissonSystem:
     #: Constant contribution of Dirichlet boundaries, added to the right-hand
     #: side at solve time.  Zero everywhere for an all-Neumann problem.
     bc_rhs: np.ndarray = None  # type: ignore[assignment]
+    #: Per-row scaling the operator was assembled with -- cell area over mean
+    #: cell area, which is what makes a stretched-mesh operator symmetric.  The
+    #: right-hand side has to carry the same factor or the solution is not the
+    #: one the projection wants.  Exactly ``1.0`` on a uniform mesh.
+    row_scale: np.ndarray | float = 1.0
 
     def __post_init__(self) -> None:
         if self.bc_rhs is None:
@@ -114,7 +119,7 @@ def assemble_poisson_matrix(
     Parameters
     ----------
     mesh:
-        Uniform structured mesh.
+        Structured mesh, uniform or stretched.
     periodic_x, periodic_y:
         Whether the corresponding axis wraps.
     solid_mask:
@@ -135,10 +140,30 @@ def assemble_poisson_matrix(
         order, and -- decisively -- discard that cell's divergence equation, so
         the cells along the outlet would no longer be divergence-free.  Keeping
         the row intact preserves the solver's central invariant.
+
+    Why the rows are scaled by cell area
+    ------------------------------------
+    The operator the projection needs is exactly ``div(grad(p))`` as the solver
+    discretises each half.  Written that way on a stretched mesh it is *not
+    symmetric*: the face between cells ``i`` and ``i+1`` contributes
+    ``1/(h_i * hu)`` to one row and ``1/(h_{i+1} * hu)`` to the other, and
+    those differ the moment the two cells differ in size.  An asymmetric matrix
+    would quietly invalidate both conjugate gradients and the multigrid
+    V-cycle, which are built on the assumption and do not check it.
+
+    Multiplying each row by its own cell area clears the offending factor and
+    leaves ``area_face / distance_between_centres`` on both sides of every
+    face -- symmetric by construction, and still exactly ``div(grad(p))``
+    scaled row-wise, so the projection still removes the divergence to
+    round-off.  The right-hand side is scaled to match.
+
+    Dividing through by the *mean* cell area then keeps the entries the size
+    they always were, and on a uniform mesh makes the scaling exactly ``1`` --
+    so a uniform problem assembles the identical matrix it did before stretched
+    meshes were supported.
     """
-    mesh.require_uniform("pressure Poisson assembly")
     nx, ny = mesh.shape
-    dx, dy = mesh.dx, mesh.dy
+    metrics = mesh.metrics
     n = nx * ny
 
     solid = (
@@ -158,15 +183,40 @@ def assemble_poisson_matrix(
     data: list[np.ndarray] = []
 
     dirichlet = dict(dirichlet or {})
+    if mesh.is_uniform:
+        # Exactly the arithmetic used before stretched meshes were supported,
+        # so a uniform problem assembles the identical matrix.
+        dx, dy = mesh.dx, mesh.dy
+        cx = cy = None
+        coeff_x, coeff_y = 1.0 / (dx * dx), 1.0 / (dy * dy)
+        row_scale: np.ndarray | float = 1.0
+    else:
+        # area of the shared face / distance between the two cell centres,
+        # divided by the mean cell area.  Symmetric because both cells sharing
+        # a face see the same expression -- see the docstring.
+        vbar = float(metrics.cell_areas.mean())
+        hx = mesh.dx_cells[:, None]
+        hy = mesh.dy_cells[None, :]
+        hxu = 0.5 * (np.concatenate(([mesh.dx_cells[0]], mesh.dx_cells))
+                     + np.concatenate((mesh.dx_cells, [mesh.dx_cells[-1]])))
+        hyv = 0.5 * (np.concatenate(([mesh.dy_cells[0]], mesh.dy_cells))
+                     + np.concatenate((mesh.dy_cells, [mesh.dy_cells[-1]])))
+        cx = hy / (hxu[:, None] * vbar)          # (nx+1, ny), indexed by x-face
+        cy = hx / (hyv[None, :] * vbar)          # (nx, ny+1), indexed by y-face
+        coeff_x = coeff_y = None
+        row_scale = (metrics.cell_areas / vbar).ravel()
+
     # Each (axis, shift) leaves the domain through exactly one wall, so the
-    # boundary faces of that direction are precisely that wall's faces.
+    # boundary faces of that direction are precisely that wall's faces.  The
+    # coefficient belongs to the *face* crossed, which for a cell at index k is
+    # face k on the low side and face k+1 on the high side.
     directions = (
-        (0, -1, dx, periodic_x, "left"),
-        (0, +1, dx, periodic_x, "right"),
-        (1, -1, dy, periodic_y, "bottom"),
-        (1, +1, dy, periodic_y, "top"),
+        (0, -1, coeff_x if cx is None else cx[0:nx, :], periodic_x, "left"),
+        (0, +1, coeff_x if cx is None else cx[1:nx + 1, :], periodic_x, "right"),
+        (1, -1, coeff_y if cy is None else cy[:, 0:ny], periodic_y, "bottom"),
+        (1, +1, coeff_y if cy is None else cy[:, 1:ny + 1], periodic_y, "top"),
     )
-    for axis, shift, h, periodic, wall in directions:
+    for axis, shift, coeff, periodic, wall in directions:
         nb = _neighbor_indices(idx, axis, shift, periodic)
         # A face contributes only if both sides are fluid cells inside the domain.
         nb_is_fluid = np.zeros_like(nb, dtype=bool)
@@ -174,11 +224,11 @@ def assemble_poisson_matrix(
         nb_is_fluid[inside] = fluid.ravel()[nb[inside]]
         active = fluid & inside & nb_is_fluid
 
-        coeff = 1.0 / (h * h)
         rows.append(idx[active])
         cols.append(nb[active])
-        data.append(np.full(int(active.sum()), coeff))
-        diag -= coeff * active          # one -1/h^2 per active face
+        data.append(np.full(int(active.sum()), coeff) if np.isscalar(coeff)
+                    else coeff[active])
+        diag -= coeff * active          # one -coeff per active face
 
         if wall in dirichlet:
             # Domain-boundary faces of a Dirichlet wall stay in the stencil,
@@ -217,7 +267,7 @@ def assemble_poisson_matrix(
     pin = int(np.flatnonzero(solvable.ravel())[0]) if solvable.any() else 0
 
     return PoissonSystem(A, (nx, ny), solvable.ravel().copy(), singular, pin,
-                         bc.ravel().copy())
+                         bc.ravel().copy(), row_scale)
 
 
 # --------------------------------------------------------------------------- #
@@ -249,7 +299,8 @@ class PoissonSolverBase:
     # -- helpers ------------------------------------------------------- #
     def _prepare_rhs(self, rhs: np.ndarray) -> np.ndarray:
         """Flatten, zero the non-solvable rows and project onto the compatible subspace."""
-        b = np.asarray(rhs, dtype=float).ravel() + self.system.bc_rhs
+        b = (np.asarray(rhs, dtype=float).ravel() * self.system.row_scale
+             + self.system.bc_rhs)
         fluid = self.system.fluid
         b[~fluid] = 0.0
         if self.system.singular:

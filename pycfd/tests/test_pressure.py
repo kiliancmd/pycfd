@@ -224,11 +224,47 @@ def test_mask_shape_is_validated():
         assemble_poisson_matrix(mesh, solid_mask=np.zeros((4, 4), dtype=bool))
 
 
-def test_stretched_mesh_is_refused():
-    from pycfd.core.mesh import NonUniformMeshError
+def test_a_stretched_mesh_assembles_a_symmetric_operator():
+    """The reason the rows are scaled by cell area.
 
-    with pytest.raises(NonUniformMeshError):
-        assemble_poisson_matrix(StructuredMesh(8, 8, stretch_x=1.1))
+    Discretised as written, ``div(grad(p))`` on a stretched mesh is asymmetric:
+    the two cells either side of a face divide the same face coefficient by
+    their own differing widths.  Conjugate gradients and the multigrid V-cycle
+    both assume symmetry and neither checks it, so an asymmetric operator here
+    would not fail loudly -- it would just stop converging for reasons that
+    look like a bad preconditioner.
+    """
+    system = assemble_poisson_matrix(StructuredMesh(12, 9, stretch_x=1.15,
+                                                   stretch_y=1.08))
+    A = system.A
+    assert abs(A - A.T).max() < 1.0e-14
+
+
+def test_a_uniform_mesh_assembles_exactly_what_it_always_did():
+    """The area scaling must be invisible when every area is the same."""
+    system = assemble_poisson_matrix(StructuredMesh(8, 8, lx=2.0, ly=3.0))
+    assert np.isscalar(system.row_scale) and system.row_scale == 1.0
+
+    mesh = StructuredMesh(8, 8, lx=2.0, ly=3.0)
+    dx, dy = mesh.dx, mesh.dy
+    A = system.A.toarray()
+    # An interior cell keeps the textbook 5-point coefficients.
+    interior = 3 * 8 + 3
+    assert A[interior, interior] == pytest.approx(-2.0 / dx**2 - 2.0 / dy**2)
+    assert A[interior, interior + 8] == pytest.approx(1.0 / dx**2)
+    assert A[interior, interior + 1] == pytest.approx(1.0 / dy**2)
+
+
+def test_the_stretched_operator_still_annihilates_a_constant():
+    """All-Neumann means the constant is in the null space, on any spacing.
+
+    Both the singular direct solve and the multigrid coarse-grid correction
+    subtract a mean to handle that null space; if stretching moved it, they
+    would each be removing the wrong thing.
+    """
+    system = assemble_poisson_matrix(StructuredMesh(10, 10, stretch_x=1.2,
+                                                   stretch_y=1.2))
+    assert np.abs(system.A @ np.ones(system.n)).max() < 1.0e-12
 
 
 # --------------------------------------------------------------------------- #

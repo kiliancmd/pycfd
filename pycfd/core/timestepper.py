@@ -84,7 +84,11 @@ class TimeStepper:
         nu = self.solver.nu
         if nu <= 0:
             return float("inf")
-        dx, dy = self.mesh.dx, self.mesh.dy
+        # Stability is decided by the tightest cell, which on a stretched mesh
+        # is the smallest one -- and since the limit goes as h^2, clustering
+        # cells near a body costs quadratically here.
+        m = self.mesh.metrics
+        dx, dy = m.min_hx, m.min_hy
         return VISCOUS_SAFETY_FACTOR / (2.0 * nu * (1.0 / dx ** 2 + 1.0 / dy ** 2))
 
     def compute_dt(self, fields: FlowField) -> float:
@@ -96,7 +100,8 @@ class TimeStepper:
             return self.config.dt
 
         umax, vmax = fields.max_velocity()
-        dx, dy = self.mesh.dx, self.mesh.dy
+        m = self.mesh.metrics
+        dx, dy = m.min_hx, m.min_hy
         scale = umax / dx + vmax / dy
         dt_conv = (
             self.config.cfl_max / scale
@@ -110,7 +115,8 @@ class TimeStepper:
     def cfl_number(self, fields: FlowField, dt: float) -> float:
         """Courant number actually realised by ``dt``."""
         umax, vmax = fields.max_velocity()
-        return float(dt * (umax / self.mesh.dx + vmax / self.mesh.dy))
+        m = self.mesh.metrics
+        return float(dt * (umax / m.min_hx + vmax / m.min_hy))
 
     # ------------------------------------------------------------------ #
     def _check_health(self, fields: FlowField, dt: float) -> None:
@@ -245,7 +251,6 @@ class TimeStepper:
     def _diagnostics(self, fields: FlowField, dt: float, rate_of_change: float) -> dict:
         """Collect the per-step diagnostic bundle."""
         uc, vc = fields.cell_velocities()
-        cell_area = self.mesh.cell_area
         fx, fy = self.solver.body_force_reaction
         return {
             "step": fields.step,
@@ -253,7 +258,7 @@ class TimeStepper:
             "dt": dt,
             "cfl": self.cfl_number(fields, dt),
             "max_div": self.solver.max_divergence(fields),
-            "kinetic_energy": 0.5 * float((uc ** 2 + vc ** 2).sum()) * cell_area,
+            "kinetic_energy": 0.5 * self.mesh.metrics.integrate(uc ** 2 + vc ** 2),
             "residual": self.solver.pressure_solver.last_residual,
             "rate_of_change": rate_of_change,
             "fx": fx,
